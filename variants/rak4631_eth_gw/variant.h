@@ -253,14 +253,36 @@ SO GPIO 39/TXEN MAY NOT BE DEFINED FOR SUCCESSFUL OPERATION OF THE SX1262 - TG
 
 #define HAS_RTC 1
 
-#define HAS_ETHERNET 1
+#define HAS_ETHERNET 0
 
 #define RAK_4631 1
+
+// Override default MAX_NUM_NODES for RAK4631 - make it dynamic
+extern const uint32_t DEFAULT_MAX_NODES;  // Minimum safe limit (350)
+extern uint32_t dynamic_max_nodes;        // Current limit (can only increase from default)
+#define MAX_NUM_NODES dynamic_max_nodes
+
+// Reduce messages stored for phone connection to save RAM
+#define MAX_RX_TOPHONE 4     // Reduce from default 32 to 4 (save ~28*MeshPacket_size RAM)
 
 #define PIN_ETHERNET_RESET 21
 #define PIN_ETHERNET_SS PIN_EINK_CS
 #define ETH_SPI_PORT SPI1
 #define AQ_SET_PIN 10
+
+// RadioLib optimization - exclude unused radio chips to save Flash memory
+// RAK4631 only uses SX1262, so exclude all other families
+#define RADIOLIB_EXCLUDE_SX127X 1    // Exclude SX127x family (SX1272, SX1276, SX1278, SX1279, etc)
+#define RADIOLIB_EXCLUDE_SX128X 1    // Exclude SX128x family (SX1280, SX1281, SX1282)
+#define RADIOLIB_EXCLUDE_SX123X 1    // Exclude SX123x family (SX1231, SX1233)
+#define RADIOLIB_EXCLUDE_SI443X 1    // Exclude Si443x family (Si4430, Si4431)
+#define RADIOLIB_EXCLUDE_RF69 1      // Exclude RF69 modules
+#define RADIOLIB_EXCLUDE_CC1101 1    // Exclude CC1101
+#define RADIOLIB_EXCLUDE_NRF24 1     // Exclude nRF24 modules
+#define RADIOLIB_EXCLUDE_HC05 1      // Exclude HC05 Bluetooth
+#define RADIOLIB_EXCLUDE_ESP8266 1   // Exclude ESP8266 WiFi
+#define RADIOLIB_EXCLUDE_LR11X0 1    // Exclude LR11x0 family
+// Keep only SX126X family enabled for SX1262 support
 
 #ifdef __cplusplus
 }
