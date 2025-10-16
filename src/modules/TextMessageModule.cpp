@@ -13,14 +13,10 @@
 #include <cstring>
 extern Router *router;
 
-// Define DEFAULT_MAX_NODES if not already defined in variant
-#ifndef DEFAULT_MAX_NODES
-#if defined(ARCH_NRF52)
-#define DEFAULT_MAX_NODES 80  // Standard nRF52 limit from mesh-pb-constants.h
-#else
-#define DEFAULT_MAX_NODES 100 // Default for other platforms
-#endif
-#endif
+// DEFAULT_MAX_NODES is defined per variant:
+// - rak4631_eth_gw: extern const uint32_t DEFAULT_MAX_NODES = 350
+// - rak4631: extern const uint32_t DEFAULT_MAX_NODES = 80
+// Note: No fallback needed as all variants should define this
 
 TextMessageModule *textMessageModule;
 
