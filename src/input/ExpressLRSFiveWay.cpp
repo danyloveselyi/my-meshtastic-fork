@@ -238,7 +238,12 @@ void ExpressLRSFiveWay::shutdown()
     screen->startAlert("Shutting down...");
     // Don't set alerting = true. We don't want to auto-dismiss this alert.
 
+    // Conditional shutdown melody for ExpressLRS input - only when RTTTL support is available
+    // Allows users with buzzer hardware to get audio feedback during shutdown sequence
+    // Prevents linker errors when MESHTASTIC_EXCLUDE_RTTTL=1 is defined for memory optimization
+#ifndef MESHTASTIC_EXCLUDE_RTTTL
     playShutdownMelody(); // In case user adds a buzzer
+#endif
 
     shutdownAtMsec = millis() + 3000;
 }

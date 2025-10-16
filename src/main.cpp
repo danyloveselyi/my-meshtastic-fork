@@ -33,6 +33,7 @@
 #include "mesh/generated/meshtastic/config.pb.h"
 #include "meshUtils.h"
 #include "modules/Modules.h"
+#include "modules/TextMessageModule.h"
 #include "shutdown.h"
 #include "sleep.h"
 #include "target_specific.h"
@@ -786,8 +787,13 @@ void setup()
         IS_ONE_OF(config.device.role, meshtastic_Config_DeviceConfig_Role_TRACKER,
                   meshtastic_Config_DeviceConfig_Role_TAK_TRACKER, meshtastic_Config_DeviceConfig_Role_SENSOR))
         LOG_DEBUG("Tracker/Sensor: Skip start melody");
-    else
+    else {
+        // Conditional startup melody - only available when RTTTL support is not excluded
+        // Prevents linker errors when MESHTASTIC_EXCLUDE_RTTTL=1 is defined for memory optimization
+#ifndef MESHTASTIC_EXCLUDE_RTTTL
         playStartMelody();
+#endif
+    }
 
 #if !HAS_TFT
     // fixed screen override?
@@ -1404,6 +1410,11 @@ void loop()
 #endif
 
     service->loop();
+
+    // Handle periodic memory monitoring
+    if (textMessageModule) {
+        textMessageModule->doPeriodicWork();
+    }
 
     long delayMsec = mainController.runOrDelay();
 

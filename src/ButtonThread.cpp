@@ -291,7 +291,11 @@ int32_t ButtonThread::runOnce()
         // may wake the board immediatedly.
         case BUTTON_EVENT_LONG_RELEASED: {
             LOG_INFO("Shutdown from long press");
+            // Conditional shutdown melody on long button press - only when RTTTL support is available
+            // Prevents linker errors when MESHTASTIC_EXCLUDE_RTTTL=1 is defined for memory optimization
+#ifndef MESHTASTIC_EXCLUDE_RTTTL
             playShutdownMelody();
+#endif
             delay(3000);
             power->shutdown();
             break;

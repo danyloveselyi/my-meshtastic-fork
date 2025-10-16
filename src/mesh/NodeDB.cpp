@@ -21,7 +21,12 @@
 #include "main.h"
 #include "mesh-pb-constants.h"
 #include "meshUtils.h"
+// Support for MESHTASTIC_EXCLUDE_NEIGHBORINFO flag - allows excluding NeighborInfoModule
+// to save memory on memory-constrained devices. When flag is set, neighbor discovery
+// and topology tracking functionality is removed from the build.
+#ifndef MESHTASTIC_EXCLUDE_NEIGHBORINFO
 #include "modules/NeighborInfoModule.h"
+#endif
 #include <ErriezCRC32.h>
 #include <algorithm>
 #include <pb_decode.h>
@@ -475,7 +480,7 @@ void NodeDB::installDefaultNodeDatabase()
 {
     LOG_DEBUG("Install default NodeDatabase");
     nodeDatabase.version = DEVICESTATE_CUR_VER;
-    nodeDatabase.nodes = std::vector<meshtastic_NodeInfoLite>(MAX_NUM_NODES);
+    nodeDatabase.nodes = std::vector<meshtastic_NodeInfoLite>(dynamic_max_nodes);
     numMeshNodes = 0;
     meshNodes = &nodeDatabase.nodes;
 }
@@ -935,8 +940,12 @@ void NodeDB::resetNodes()
     devicestate.has_rx_waypoint = false;
     saveNodeDatabaseToDisk();
     saveDeviceStateToDisk();
+    // Conditional neighbor reset - only available when NeighborInfoModule is not excluded
+    // Saves ~4-6KB flash memory when MESHTASTIC_EXCLUDE_NEIGHBORINFO=1 is defined
+#ifndef MESHTASTIC_EXCLUDE_NEIGHBORINFO
     if (neighborInfoModule && moduleConfig.neighbor_info.enabled)
         neighborInfoModule->resetNeighbors();
+#endif
 }
 
 void NodeDB::removeNodeByNum(NodeNum nodeNum)
@@ -1127,11 +1136,11 @@ void NodeDB::loadFromDisk()
         LOG_INFO("Loaded saved nodedatabase version %d, with nodes count: %d", nodeDatabase.version, nodeDatabase.nodes.size());
     }
 
-    if (numMeshNodes > MAX_NUM_NODES) {
-        LOG_WARN("Node count %d exceeds MAX_NUM_NODES %d, truncating", numMeshNodes, MAX_NUM_NODES);
-        numMeshNodes = MAX_NUM_NODES;
+    if (numMeshNodes > dynamic_max_nodes) {
+        LOG_WARN("Node count %d exceeds dynamic_max_nodes %d, truncating", numMeshNodes, dynamic_max_nodes);
+        numMeshNodes = dynamic_max_nodes;
     }
-    meshNodes->resize(MAX_NUM_NODES);
+    meshNodes->resize(dynamic_max_nodes);
 
     // static DeviceState scratch; We no longer read into a tempbuf because this structure is 15KB of valuable RAM
     state = loadProto(deviceStateFileName, meshtastic_DeviceState_size, sizeof(meshtastic_DeviceState),
@@ -1272,6 +1281,9 @@ void NodeDB::loadFromDisk()
 
         saveToDisk(SEGMENT_MODULECONFIG);
     }
+
+    // dynamic_max_nodes is already initialized in variant.cpp, just log it
+    LOG_INFO("Using max_nodes: %d", dynamic_max_nodes);
 }
 
 /** Save a protobuf from a file, return true for success */
@@ -1676,7 +1688,7 @@ meshtastic_NodeInfoLite *NodeDB::getMeshNode(NodeNum n)
 // returns true if the maximum number of nodes is reached or we are running low on memory
 bool NodeDB::isFull()
 {
-    return (numMeshNodes >= MAX_NUM_NODES) || (memGet.getFreeHeap() < MINIMUM_SAFE_FREE_HEAP);
+    return (numMeshNodes >= dynamic_max_nodes) || (memGet.getFreeHeap() < MINIMUM_SAFE_FREE_HEAP);
 }
 
 /// Find a node in our DB, create an empty NodeInfo if missing
@@ -1721,13 +1733,19 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                 (numMeshNodes)--;
             }
         }
-        // add the node at the end
-        lite = &meshNodes->at((numMeshNodes)++);
+        // add the node at the end, but check bounds first
+        if (numMeshNodes < dynamic_max_nodes && numMeshNodes < meshNodes->size()) {
+            lite = &meshNodes->at(numMeshNodes);
+            numMeshNodes++;
 
-        // everything is missing except the nodenum
-        memset(lite, 0, sizeof(*lite));
-        lite->num = n;
-        LOG_INFO("Adding node to database with %i nodes and %u bytes free!", numMeshNodes, memGet.getFreeHeap());
+            // everything is missing except the nodenum
+            memset(lite, 0, sizeof(*lite));
+            lite->num = n;
+            LOG_INFO("Adding node to database with %i nodes and %u bytes free!", numMeshNodes, memGet.getFreeHeap());
+        } else {
+            LOG_ERROR("Cannot add node: database size limit reached");
+            return nullptr;
+        }
     }
 
     return lite;
