@@ -43,6 +43,24 @@ class DeviceTelemetryModule : private concurrency::OSThread, public ProtobufModu
   private:
     meshtastic_Telemetry getDeviceTelemetry();
     meshtastic_Telemetry getLocalStatsTelemetry();
+    
+    /*
+     * Memory-efficient telemetry using existing protobuf structures
+     * 
+     * This function repurposes meshtastic_EnvironmentMetrics fields to send memory 
+     * and node statistics without creating custom protobuf definitions.
+     * This optimization saves Flash memory by reusing existing protobuf code.
+     * 
+     * Field mapping: Environment sensor → Memory/Node data
+     * - gas_resistance → Flash total (KB)
+     * - relative_humidity → Flash free (KB) 
+     * - iaq → Heap total (KB)
+     * - lux → Heap free (KB)
+     * - white_lux → Online nodes count
+     * - barometric_pressure → Total nodes count
+     * - current → Max nodes limit
+     */
+    meshtastic_Telemetry getMemoryStatsAsEnvironmentTelemetry();
 
     void sendLocalStatsToPhone();
     uint32_t sendToPhoneIntervalMs = SECONDS_IN_MINUTE * 1000;           // Send to phone every minute

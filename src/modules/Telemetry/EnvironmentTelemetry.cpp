@@ -479,12 +479,22 @@ bool EnvironmentTelemetryModule::handleReceivedProtobuf(const meshtastic_MeshPac
     return false; // Let others look at this message also if they want
 }
 
+/*
+ * Standard environment sensor telemetry using native protobuf structure
+ * 
+ * This function uses meshtastic_EnvironmentMetrics protobuf in its intended way
+ * for actual environmental sensor data (temperature, humidity, pressure, etc.)
+ * 
+ * NOTE: The same protobuf structure is reused in DeviceTelemetry module for 
+ * memory statistics to avoid creating custom protobuf definitions - see
+ * DeviceTelemetryModule::getMemoryStatsAsEnvironmentTelemetry() for field mapping.
+ */
 bool EnvironmentTelemetryModule::getEnvironmentTelemetry(meshtastic_Telemetry *m)
 {
     bool valid = true;
     bool hasSensor = false;
     m->time = getTime();
-    m->which_variant = meshtastic_Telemetry_environment_metrics_tag;
+    m->which_variant = meshtastic_Telemetry_environment_metrics_tag;  // Use environment variant for actual sensor data
     m->variant.environment_metrics = meshtastic_EnvironmentMetrics_init_zero;
 
 #ifdef SENSECAP_INDICATOR
