@@ -11,6 +11,9 @@ class MemGet
     uint32_t getHeapSize();
     uint32_t getFreePsram();
     uint32_t getPsramSize();
+    uint32_t getFlashTotal();
+    uint32_t getFlashUsed();
+    uint32_t getFlashFree();
 };
 
 extern MemGet memGet;

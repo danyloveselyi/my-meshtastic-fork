@@ -149,7 +149,12 @@ class GPS : private concurrency::OSThread
 
     TinyGPSPlus reader;
     uint8_t fixQual = 0; // fix quality from GPGGA
+    // Support for TINYGPS_OPTION_NO_STATISTICS flag - allows excluding GPS statistics tracking
+    // to save memory on memory-constrained devices. When flag is set, checksum failure counting
+    // and other GPS statistics are removed from the build.
+#ifndef TINYGPS_OPTION_NO_STATISTICS
     uint32_t lastChecksumFailCount = 0;
+#endif
 
 #ifndef TINYGPS_OPTION_NO_CUSTOM_FIELDS
     // (20210908) TinyGps++ can only read the GPGSA "FIX TYPE" field

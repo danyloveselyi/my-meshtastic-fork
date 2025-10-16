@@ -79,3 +79,64 @@ uint32_t MemGet::getPsramSize()
     return 0;
 #endif
 }
+
+/**
+ * @brief Returns the total Flash memory size in bytes.
+ *
+ * @return uint32_t Total Flash memory size.
+ */
+uint32_t MemGet::getFlashTotal()
+{
+#ifdef ARCH_ESP32
+    return ESP.getFlashChipSize();
+#elif defined(ARCH_NRF52)
+    // Flash size for nRF52840: usable flash 0xED000 - 0x27000 = 815104 bytes
+    return 815104;
+#elif defined(ARCH_RP2040)
+    return 2 * 1024 * 1024; // 2MB typical
+#elif defined(ARCH_PORTDUINO)
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+/**
+ * @brief Returns the used Flash memory size in bytes.
+ *
+ * @return uint32_t Used Flash memory size.
+ */
+uint32_t MemGet::getFlashUsed()
+{
+#ifdef ARCH_ESP32
+    return ESP.getSketchSize();
+#elif defined(ARCH_NRF52)
+    // For nRF52, calculate program size from linker symbols
+    extern uint32_t __etext;
+    extern uint32_t __data_start__;
+    extern uint32_t __data_end__;
+
+    // Calculate used flash: code section + initialized data
+    uint32_t codeSize = (uint32_t)&__etext - 0x27000; // From flash start to end of text
+    uint32_t dataSize = (uint32_t)&__data_end__ - (uint32_t)&__data_start__;
+    return codeSize + dataSize;
+#elif defined(ARCH_RP2040)
+    return 0; // Not easily available
+#elif defined(ARCH_PORTDUINO)
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+/**
+ * @brief Returns the free Flash memory size in bytes.
+ *
+ * @return uint32_t Free Flash memory size.
+ */
+uint32_t MemGet::getFlashFree()
+{
+    uint32_t total = getFlashTotal();
+    uint32_t used = getFlashUsed();
+    return (total > used) ? (total - used) : 0;
+}
