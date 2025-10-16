@@ -21,6 +21,23 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
     */
     virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
     virtual bool wantPacket(const meshtastic_MeshPacket *p) override;
+
+  private:
+      void sendAutoReply(const meshtastic_MeshPacket &original);
+      void sendMemoryStats(uint32_t toNode);
+
+      // Monitoring variables
+      uint32_t monitoringNodeId = 0;  // Node ID that requested monitoring (0 = disabled)
+      uint32_t lastMonitorTime = 0;   // Last time we sent monitoring stats
+      uint32_t monitorIntervalMs = 30000; // Monitor interval in milliseconds (default 30s)
+      uint32_t monitorMessageCounter = 0; // Sequential counter for monitoring messages
+
+      // Interactive setup variables
+      uint32_t waitingIntervalNodeId = 0; // Node ID waiting for interval input (0 = not waiting)
+      uint32_t waitingMaxNodesNodeId = 0; // Node ID waiting for max nodes input (0 = not waiting)
+
+  public:
+      void doPeriodicWork(); // Called periodically to send monitoring updates
 };
 
 extern TextMessageModule *textMessageModule;
