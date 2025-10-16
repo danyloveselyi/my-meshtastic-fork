@@ -25,12 +25,14 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
   private:
       void sendAutoReply(const meshtastic_MeshPacket &original);
       void sendMemoryStats(uint32_t toNode);
+      void formatMemoryStats(char* buffer, size_t bufferSize, const char* prefix = "");
 
       // Monitoring variables
       uint32_t monitoringNodeId = 0;  // Node ID that requested monitoring (0 = disabled)
       uint32_t lastMonitorTime = 0;   // Last time we sent monitoring stats
       uint32_t monitorIntervalMs = 30000; // Monitor interval in milliseconds (default 30s)
-      uint32_t monitorMessageCounter = 0; // Sequential counter for monitoring messages
+      uint32_t monitorMessageCounter = 0; // Sequential counter for monitoring messages (safe overflow)
+      uint32_t lastMemoryCheck = 0;   // Last memory check time (moved from static)
 
       // Interactive setup variables
       uint32_t waitingIntervalNodeId = 0; // Node ID waiting for interval input (0 = not waiting)

@@ -78,27 +78,10 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
 
     // Check if this is a memory stats command
     if (isCommand && (strcmp(trimmed, "mem") == 0 || strcmp(trimmed, "memory") == 0)) {
-        // Get memory and node statistics
-        float flashTotal = memGet.getFlashTotal() / 1024.0f; // KB
-        float flashFree = memGet.getFlashFree() / 1024.0f;   // KB
-        uint32_t heapTotal = memGet.getHeapSize() / 1024;    // KB
-        float heapFree = memGet.getFreeHeap() / 1024.0f;     // KB
-        uint32_t onlineNodes = nodeDB->getNumOnlineMeshNodes();
-        uint32_t totalNodes = nodeDB->getNumMeshNodes();
-        uint32_t maxNodes = dynamic_max_nodes;  // Use dynamic value
-        uint32_t freeSlots = (maxNodes > totalNodes) ? (maxNodes - totalNodes) : 0;
-
-        // Calculate used amounts
-        float flashUsed = flashTotal - flashFree;
-        uint32_t heapUsed = heapTotal - (uint32_t)heapFree;
-
-        // Create reply with memory stats only
-        snprintf(replyBuffer, sizeof(replyBuffer),
-                 "Mem Stats: Flash=%.0f/%.0f(free:%.0f)KB Heap=%u/%u(free:%.0f)KB Nodes=%u/%u(free:%u)",
-                 flashTotal, flashUsed, flashFree,
-                 heapTotal, heapUsed, heapFree,
-                 maxNodes, totalNodes, freeSlots);
-        replyText = replyBuffer;
+        // Create reply with memory stats using shared formatting
+        char statsBuffer[200];
+        formatMemoryStats(statsBuffer, sizeof(statsBuffer));
+        replyText = statsBuffer;
     } else if (isCommand && (strcmp(trimmed, "mon start") == 0 || strcmp(trimmed, "monstart") == 0)) {
         // Start interactive setup for monitoring interval
         waitingIntervalNodeId = original.from;
@@ -197,25 +180,21 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
 
 void TextMessageModule::sendMemoryStats(uint32_t toNode)
 {
-    // Get memory and node statistics matching /mem command format
-    float flashTotal = memGet.getFlashTotal() / 1024.0f; // KB
-    float flashFree = memGet.getFlashFree() / 1024.0f;   // KB
-    float heapTotal = memGet.getHeapSize() / 1024.0f;    // KB
-    float heapFree = memGet.getFreeHeap() / 1024.0f;     // KB
-    float heapUsed = heapTotal - heapFree;               // KB
-    
-    uint32_t nodes = nodeDB ? nodeDB->getNumMeshNodes() : 0;
-    uint32_t nodesOnline = nodeDB ? nodeDB->getNumOnlineMeshNodes() : 0;
+    // Increment message counter for monitoring sequence (safe overflow)
+    monitorMessageCounter++;
+    // Counter will safely overflow from UINT32_MAX back to 0 after ~136 years at 30s intervals
 
-    // Format response similar to console /mem command
+    // Format monitoring message with counter in square brackets using shared formatting
     char statsBuffer[200];
-    snprintf(statsBuffer, sizeof(statsBuffer), 
-             "Memory: Flash=%.1fKB free, Heap=%.1fKB used/%.1fKB total, Nodes=%u online/%u total",
-             flashFree, heapUsed, heapTotal, nodesOnline, nodes);
+    char prefix[20];
+    snprintf(prefix, sizeof(prefix), "[ %u ] ", monitorMessageCounter);
+    formatMemoryStats(statsBuffer, sizeof(statsBuffer), prefix);
 
+    // Allocate packet with safety check for long-term monitoring
     meshtastic_MeshPacket *reply = router->allocForSending();
     if (!reply) {
-        LOG_ERROR("Failed to allocate packet for memory stats - out of memory!");
+        LOG_ERROR("Failed to allocate packet for memory stats - monitoring may need restart");
+        // Don't reset monitoring automatically to avoid infinite loops
         return;
     }
 
@@ -236,31 +215,78 @@ void TextMessageModule::doPeriodicWork()
 
     // Check if monitoring is enabled and it's time to send update
     if (monitoringNodeId != 0) {
-        // Handle millis() overflow safely
+        // Handle millis() overflow safely (works for years of continuous operation)
         uint32_t elapsed = (now >= lastMonitorTime) ? (now - lastMonitorTime) : (UINT32_MAX - lastMonitorTime + now + 1);
         if (elapsed >= monitorIntervalMs) {
-            sendMemoryStats(monitoringNodeId);
+            // Additional safety check before sending
+            if (memGet.getFreeHeap() < MINIMUM_SAFE_FREE_HEAP) {
+                LOG_WARN("Skipping monitoring message due to low memory: %u bytes", memGet.getFreeHeap());
+            } else {
+                sendMemoryStats(monitoringNodeId);
+            }
             lastMonitorTime = now;
         }
     }
 
-    // Periodic memory monitoring every 5 minutes
-    static uint32_t lastMemCheck = 0;
-    uint32_t memElapsed = (now >= lastMemCheck) ? (now - lastMemCheck) : (UINT32_MAX - lastMemCheck + now + 1);
-    if (memElapsed > 300000) { // 5 minutes
+    // Periodic memory monitoring every 5 minutes (moved from static for thread safety)
+    uint32_t memElapsed = (now >= lastMemoryCheck) ? (now - lastMemoryCheck) : (UINT32_MAX - lastMemoryCheck + now + 1);
+    if (memElapsed > 300000) { // 5 minutes = 300,000ms
         uint32_t freeHeap = memGet.getFreeHeap();
         if (freeHeap < MINIMUM_SAFE_FREE_HEAP * 2) {
-            LOG_WARN("Low memory detected: %u bytes free", freeHeap);
-            // Log memory stats for debugging
+            LOG_WARN("Low memory detected: %u bytes free (threshold: %u)", freeHeap, MINIMUM_SAFE_FREE_HEAP * 2);
+            // Log additional diagnostics for long-term monitoring
             if (nodeDB) {
-                LOG_INFO("Nodes in DB: %u/%u", nodeDB->getNumMeshNodes(), dynamic_max_nodes);
+                uint32_t nodeCount = nodeDB->getNumMeshNodes();
+                LOG_INFO("Memory diagnostics - Nodes: %u/%u, Monitoring: %s, Counter: %u", 
+                        nodeCount, dynamic_max_nodes,
+                        (monitoringNodeId != 0) ? "active" : "inactive",
+                        monitorMessageCounter);
             }
         }
-        lastMemCheck = now;
+        lastMemoryCheck = now;
     }
 }
 
 bool TextMessageModule::wantPacket(const meshtastic_MeshPacket *p)
 {
     return MeshService::isTextPayload(p);
+}
+
+void TextMessageModule::formatMemoryStats(char* buffer, size_t bufferSize, const char* prefix)
+{
+    // Safety check for long-term operation
+    if (!buffer || bufferSize < 100) {
+        LOG_ERROR("Invalid buffer for memory stats formatting");
+        return;
+    }
+
+    // Get memory and node statistics with safety checks
+    float flashTotal = memGet.getFlashTotal() / 1024.0f; // KB
+    float flashFree = memGet.getFlashFree() / 1024.0f;   // KB
+    uint32_t heapTotal = memGet.getHeapSize() / 1024;    // KB
+    float heapFree = memGet.getFreeHeap() / 1024.0f;     // KB
+    
+    // Protect against null nodeDB (can happen during shutdown)
+    uint32_t onlineNodes = nodeDB ? nodeDB->getNumOnlineMeshNodes() : 0;
+    uint32_t totalNodes = nodeDB ? nodeDB->getNumMeshNodes() : 0;
+    uint32_t maxNodes = dynamic_max_nodes;  // Use dynamic value
+    uint32_t freeSlots = (maxNodes > totalNodes) ? (maxNodes - totalNodes) : 0;
+
+    // Calculate used amounts with overflow protection
+    float flashUsed = (flashTotal >= flashFree) ? (flashTotal - flashFree) : 0.0f;
+    uint32_t heapUsed = (heapTotal >= (uint32_t)heapFree) ? (heapTotal - (uint32_t)heapFree) : 0;
+
+    // Format: total/used(free:amount) - safe for long-term operation
+    int result = snprintf(buffer, bufferSize,
+             "%sMem Stats: Flash=%.0f/%.0f(free:%.0f)KB Heap=%u/%u(free:%.0f)KB Nodes=%u/%u(free:%u)",
+             prefix ? prefix : "",
+             flashTotal, flashUsed, flashFree,
+             heapTotal, heapUsed, heapFree,
+             maxNodes, totalNodes, freeSlots);
+             
+    // Ensure null termination for safety
+    if (result >= (int)bufferSize) {
+        buffer[bufferSize - 1] = '\0';
+        LOG_WARN("Memory stats message truncated");
+    }
 }
