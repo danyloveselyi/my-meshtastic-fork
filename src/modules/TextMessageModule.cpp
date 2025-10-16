@@ -13,6 +13,15 @@
 #include <cstring>
 extern Router *router;
 
+// Define DEFAULT_MAX_NODES if not already defined in variant
+#ifndef DEFAULT_MAX_NODES
+#if defined(ARCH_NRF52)
+#define DEFAULT_MAX_NODES 80  // Standard nRF52 limit from mesh-pb-constants.h
+#else
+#define DEFAULT_MAX_NODES 100 // Default for other platforms
+#endif
+#endif
+
 TextMessageModule *textMessageModule;
 
 ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp)

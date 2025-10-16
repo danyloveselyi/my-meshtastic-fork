@@ -272,6 +272,10 @@ SO GPIO 39/TXEN MAY NOT BE DEFINED FOR SUCCESSFUL OPERATION OF THE SX1262 - TG
 }
 #endif
 
+// Dynamic node limit for standard RAK4631 configuration
+extern const uint32_t DEFAULT_MAX_NODES;  // Standard safe limit (80)
+extern uint32_t dynamic_max_nodes;        // Current limit (can be changed via TextMessageModule)
+
 /*----------------------------------------------------------------------------
  *        Arduino objects - C++ only
  *----------------------------------------------------------------------------*/
