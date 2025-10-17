@@ -1,3 +1,4 @@
+
 # Meshtastic Firmware Copilot Instructions
 
 ## Architecture Overview
@@ -9,13 +10,19 @@
 - **Mesh networking**: Core mesh logic in `src/mesh/` with routing, crypto, and radio interfaces
 - **Hardware variants**: Device-specific configs in `variants/*/` with pin definitions and hardware capabilities
 
+**This Fork**: Adds `MemoryMonitorModule` for RAM/Flash usage tracking, extreme value logging, and low-memory warnings. Primary supported targets are `rak4631_eth_gw` and `rak4631`.
+
+**⚠️ RAK4631 Focus**: This fork is specifically optimized for RAK4631 hardware. All development, testing, and feature implementations should prioritize RAK4631 compatibility. Other hardware variants may not function correctly or may be excluded from builds to reduce memory footprint for RAK4631 optimization.
+
 ## Key Development Patterns
 
 ### Build System (PlatformIO)
-- Primary build: `pio run -e <board_name>` (e.g., `rak4631`, `tlora-v2`)
+- **RAK4631 Primary builds**: `pio run -e rak4631` or `pio run -e rak4631_eth_gw` (default environment)
+- Other hardware not guaranteed to work: Focus development on RAK4631 variants only
 - Platform-specific builds: `bin/build-{esp32,nrf52,stm32,rpi2040}.sh`
-- Architecture configs: `arch/*/platformio.ini` with platform-specific flags and dependencies
+- Architecture configs: `arch/*/esp32.ini`, `arch/*/nrf52.ini` etc. with platform-specific flags and dependencies
 - Variant files: `variants/*/platformio.ini` override build settings per hardware variant
+- Config inheritance: Root `platformio.ini` includes all configs via `extra_configs = arch/*/*.ini, variants/*/platformio.ini`
 
 ### Module Development
 ```cpp
@@ -54,7 +61,8 @@ protected:
 ### Protocol Buffer Updates
 - Protobufs live in separate `protobufs/` submodule
 - Regenerate with `bin/regen-protos.sh` after protobuf changes
-- Generated files appear in `src/mesh/generated/`
+- Generated files appear in `src/mesh/generated/meshtastic/` (e.g., `mesh.pb.h`, `config.pb.h`)
+- Use `nanopb` library for embedded-friendly protobuf implementation
 
 ### Debugging and Logging
 - Use `LOG_DEBUG`, `LOG_INFO`, `LOG_WARN`, `LOG_ERROR` macros (not printf)
@@ -88,6 +96,14 @@ protected:
 - Serial API: `src/mesh/StreamAPI.cpp` for CLI and external app communication  
 - Bluetooth: Platform-specific in `src/nimble/` (nRF52) and ESP32 Bluetooth Classic
 - Network modes: WiFi (ESP32), Ethernet gateways, MQTT bridging
+
+## Fork-Specific Features
+
+### Memory Monitoring Module
+- `MemoryMonitorModule` in `src/modules/MemoryMonitorModule.{cpp,h}` tracks RAM/Flash usage
+- Inherits from `ProtobufModule<meshtastic_Telemetry>` following standard module patterns
+- Provides continuous monitoring, extreme value logging, and low-memory warnings
+- **Note**: Not yet registered in `src/modules/Modules.cpp` - requires manual integration
 
 ## Common Gotchas
 
