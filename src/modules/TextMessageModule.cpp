@@ -1,3 +1,16 @@
+#include <cctype>
+
+// Helper: trim leading/trailing whitespace in-place
+void trim(char* s) {
+    if (!s) return;
+    // Trim leading
+    char* start = s;
+    while (*start && isspace((unsigned char)*start)) start++;
+    if (start != s) memmove(s, start, strlen(start) + 1);
+    // Trim trailing
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len-1])) s[--len] = 0;
+}
 #include "TextMessageModule.h"
 #include "MeshService.h"
 #include "NodeDB.h"
@@ -11,7 +24,16 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+
 extern Router *router;
+
+// Context variables for interactive commands (per user)
+// For /setmaxnodes: waiting for nodes,pin
+static uint32_t waitingSetMaxNodesNodeId = 0;
+// For /monstart: waiting for interval,pin
+static uint32_t waitingMonStartNodeId = 0;
+// For /monstop: waiting for pin
+static uint32_t waitingMonStopNodeId = 0;
 
 // DEFAULT_MAX_NODES is defined per variant:
 // - rak4631_eth_gw: extern const uint32_t DEFAULT_MAX_NODES = 350
@@ -72,6 +94,19 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
 
     const char* replyText = nullptr;
 
+    // Reset other waiting states when user starts a new command (to avoid conflicts)
+    if (isCommand) {
+        if (strcmp(trimmed, "setmaxnodes") != 0 && strcmp(trimmed, "set max nodes") != 0) {
+            waitingSetMaxNodesNodeId = 0;
+        }
+        if (strcmp(trimmed, "monstart") != 0 && strcmp(trimmed, "mon start") != 0) {
+            waitingMonStartNodeId = 0;
+        }
+        if (strcmp(trimmed, "monstop") != 0 && strcmp(trimmed, "mon stop") != 0) {
+            waitingMonStopNodeId = 0;
+        }
+    }
+
     // Check if this is a memory stats command
     if (isCommand && (strcmp(trimmed, "mem") == 0 || strcmp(trimmed, "memory") == 0)) {
         // Create reply with memory stats using shared formatting
@@ -80,13 +115,16 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
         replyText = statsBuffer;
     } else if (isCommand && (strcmp(trimmed, "mon start") == 0 || strcmp(trimmed, "monstart") == 0)) {
         // Start interactive setup for monitoring interval
-        waitingIntervalNodeId = original.from;
-        replyText = "Send interval in seconds (10-86400). Ex: 30, 3600(1h)";
+        waitingMonStartNodeId = original.from;
+        snprintf(replyBuffer, sizeof(replyBuffer),
+            "Start monitoring. Enter interval (10-86400 sec) and PIN. Example: 30,1234");
+        replyText = replyBuffer;
     } else if (isCommand && (strcmp(trimmed, "mon stop") == 0 || strcmp(trimmed, "monstop") == 0)) {
-        monitoringNodeId = 0;
-        waitingIntervalNodeId = 0;
-        monitorMessageCounter = 0;
-        replyText = "Memory monitoring stopped.";
+        // Start interactive PIN check for monitoring stop
+        waitingMonStopNodeId = original.from;
+        snprintf(replyBuffer, sizeof(replyBuffer),
+            "Stop monitoring. Enter PIN. Example: 1234");
+        replyText = replyBuffer;
     } else if (isCommand && (strcmp(trimmed, "maxnodes") == 0 || strcmp(trimmed, "max nodes") == 0)) {
         // Show current max nodes setting with safety info
         snprintf(replyBuffer, sizeof(replyBuffer), 
@@ -95,10 +133,10 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
         replyText = replyBuffer;
     } else if (isCommand && (strcmp(trimmed, "setmaxnodes") == 0 || strcmp(trimmed, "set max nodes") == 0)) {
         // Ask for max nodes value with safety warning
-        waitingMaxNodesNodeId = original.from;
+        waitingSetMaxNodesNodeId = original.from;
         snprintf(replyBuffer, sizeof(replyBuffer), 
-                 "Increase max nodes (%u-1000). Current: %u. Cannot decrease below default for safety. Example: 400", 
-                 DEFAULT_MAX_NODES, dynamic_max_nodes);
+            "Increase max nodes (%u-1000). Free heap: %.1fKB. Cannot decrease below default for safety. Enter nodes,pin. Example: 400,1234", 
+            DEFAULT_MAX_NODES, memGet.getFreeHeap() / 1024.0f);
         replyText = replyBuffer;
     } else if (isCommand && (strcmp(trimmed, "help") == 0 || strcmp(trimmed, "?") == 0 || strcmp(trimmed, "commands") == 0)) {
         // Show available commands with safety note
@@ -106,52 +144,76 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
                  "Commands: /mem /monstart /monstop /maxnodes /setmaxnodes /help. Note: setmaxnodes can only increase (safe default: %u)", 
                  DEFAULT_MAX_NODES);
         replyText = replyBuffer;
-    } else if (waitingMaxNodesNodeId == original.from) {
-        // User is setting max nodes value with safety protection
-        // SAFETY: Only allow increases from default to prevent data loss from std::vector::resize()
-        // Decreasing would use resize() which removes elements from the end, potentially losing recent nodes
-        int maxNodes = atoi(originalText);
-        if (maxNodes >= DEFAULT_MAX_NODES && maxNodes <= 1000) {
-            // Safe range: can only increase from default, never decrease
+    } else if (waitingSetMaxNodesNodeId == original.from) {
+        // User is setting max nodes value with PIN
+        // Format: value,pin
+        char* valueStr = strtok(originalText, ",");
+        char* pinStr = strtok(nullptr, ",");
+        int maxNodes = valueStr ? atoi(valueStr) : 0;
+        if (pinStr) trim(pinStr);
+        bool pinOk = pinStr && strcmp(pinStr, MONITORING_PIN_CODE) == 0;
+        if (!pinOk) {
+            waitingSetMaxNodesNodeId = 0;
+            replyText = "Failed: PIN code incorrect.";
+        } else if (maxNodes >= DEFAULT_MAX_NODES && maxNodes <= 1000) {
             dynamic_max_nodes = maxNodes;
-            // Safely resize node database vector (only growing, never shrinking)
             if (nodeDB && nodeDB->meshNodes) {
                 nodeDB->meshNodes->resize(dynamic_max_nodes);
-                // No truncation needed since we only allow increases
             }
-            waitingMaxNodesNodeId = 0; // Clear waiting state
+            waitingSetMaxNodesNodeId = 0;
             snprintf(replyBuffer, sizeof(replyBuffer), "Max nodes increased to %d. Memory usage: ~%.1fKB.", 
                      maxNodes, (maxNodes * 250) / 1024.0f);
             replyText = replyBuffer;
         } else if (maxNodes < DEFAULT_MAX_NODES) {
-            // Protection: cannot decrease below safe default
-            waitingMaxNodesNodeId = 0; // Clear waiting state
+            waitingSetMaxNodesNodeId = 0;
             snprintf(replyBuffer, sizeof(replyBuffer), 
-                     "Error: Cannot set below default %u nodes. Current: %u. Decreasing node limit can lose recent node data. Use reboot to reset to default.", 
+                     "Error: Cannot set below DEFAULT_MAX_NODES (%u) nodes. Current: %u. Decreasing node limit can lose recent node data. Use reboot to reset to default.", 
                      DEFAULT_MAX_NODES, dynamic_max_nodes);
             replyText = replyBuffer;
         } else {
-            // Invalid range
             replyText = "Invalid. Use 350-1000 (cannot decrease below default).";
         }
-    } else if (waitingIntervalNodeId == original.from) {
-        // User is setting up monitoring interval
-        int interval = atoi(originalText);
-        if (interval >= 10 && interval <= 86400) {
-            monitorIntervalMs = interval * 1000; // Convert to milliseconds
+    } else if (waitingMonStartNodeId == original.from) {
+        // User is setting up monitoring interval with PIN (monstart)
+        // Format: value,pin
+        char* valueStr = strtok(originalText, ",");
+        char* pinStr = strtok(nullptr, ",");
+        int interval = valueStr ? atoi(valueStr) : 0;
+        if (pinStr) trim(pinStr);
+        bool pinOk = pinStr && strcmp(pinStr, MONITORING_PIN_CODE) == 0;
+        if (!pinOk) {
+            waitingMonStartNodeId = 0;
+            replyText = "Failed: PIN code incorrect.";
+        } else if (interval >= 10 && interval <= 86400) {
+            monitorIntervalMs = interval * 1000;
             monitoringNodeId = original.from;
             lastMonitorTime = millis();
-            waitingIntervalNodeId = 0; // Clear waiting state
-            monitorMessageCounter = 0; // Reset counter for new monitoring session
-
+            waitingMonStartNodeId = 0;
+            monitorMessageCounter = 0;
             snprintf(replyBuffer, sizeof(replyBuffer),
                      "Monitor ON: %ds intervals. Send /monstop to disable.", interval);
             replyText = replyBuffer;
         } else {
             replyText = "Invalid interval! Use 10-86400 seconds.";
         }
-    } else {
-        // Regular auto-reply for other messages - limit length to avoid memory issues
+    } else if (waitingMonStopNodeId == original.from) {
+        // /monstop PIN check (expect only PIN)
+        char* pinStr = originalText;
+        trim(pinStr);
+        bool pinOk = pinStr && strcmp(pinStr, MONITORING_PIN_CODE) == 0;
+        if (pinOk) {
+            monitoringNodeId = 0;
+            waitingMonStopNodeId = 0;
+            monitorMessageCounter = 0;
+            replyText = "Memory monitoring stopped.";
+        } else {
+            // Do not reset waitingMonStopNodeId, allow retry
+            replyText = "Failed: PIN code incorrect. Try again.";
+        }
+    }
+
+    // If no replyText was set, send default auto-reply
+    if (!replyText) {
         snprintf(replyBuffer, sizeof(replyBuffer), "Auto-reply: %.200s", originalText);
         replyText = replyBuffer;
     }
