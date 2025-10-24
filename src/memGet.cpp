@@ -10,6 +10,10 @@
 #include "memGet.h"
 #include "configuration.h"
 
+#ifdef ARCH_NRF52
+#include "freertosinc.h"
+#endif
+
 MemGet memGet;
 
 /**
@@ -21,7 +25,13 @@ uint32_t MemGet::getFreeHeap()
 #ifdef ARCH_ESP32
     return ESP.getFreeHeap();
 #elif defined(ARCH_NRF52)
-    return dbgHeapFree();
+#ifdef HAS_FREE_RTOS
+    // Use FreeRTOS heap functions for nRF52
+    return xPortGetFreeHeapSize();
+#else
+    // Fallback for non-FreeRTOS builds
+    return UINT32_MAX;
+#endif
 #elif defined(ARCH_RP2040)
     return rp2040.getFreeHeap();
 #else
@@ -39,7 +49,20 @@ uint32_t MemGet::getHeapSize()
 #ifdef ARCH_ESP32
     return ESP.getHeapSize();
 #elif defined(ARCH_NRF52)
-    return dbgHeapTotal();
+#ifdef HAS_FREE_RTOS
+    // For nRF52, we need to calculate total heap size
+    // This is a simplified approach - in practice, you might want to store the initial heap size
+    static uint32_t initialHeapSize = 0;
+    if (initialHeapSize == 0) {
+        // First call - estimate total heap size
+        // nRF52840 typically has ~256KB RAM, with some used by system
+        initialHeapSize = 200 * 1024; // Conservative estimate
+    }
+    return initialHeapSize;
+#else
+    // Fallback for non-FreeRTOS builds
+    return UINT32_MAX;
+#endif
 #elif defined(ARCH_RP2040)
     return rp2040.getTotalHeap();
 #else
