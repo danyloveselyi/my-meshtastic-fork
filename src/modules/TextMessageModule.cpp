@@ -334,7 +334,7 @@ bool TextMessageModule::wantPacket(const meshtastic_MeshPacket *p)
 void TextMessageModule::formatMemoryStats(char* buffer, size_t bufferSize, const char* prefix)
 {
     // Safety check for long-term operation
-    if (!buffer || bufferSize < 100) {
+    if (!buffer || bufferSize < 200) { // Increased buffer size for more info
         LOG_ERROR("Invalid buffer for memory stats formatting");
         return;
     }
@@ -355,13 +355,28 @@ void TextMessageModule::formatMemoryStats(char* buffer, size_t bufferSize, const
     float flashUsed = (flashTotal >= flashFree) ? (flashTotal - flashFree) : 0.0f;
     uint32_t heapUsed = (heapTotal >= (uint32_t)heapFree) ? (heapTotal - (uint32_t)heapFree) : 0;
 
+    // Get queue status
+    uint32_t toPhoneUsed = 0, toPhoneTotal = 0;
+    uint32_t statusUsed = 0, statusTotal = 0;
+    uint32_t notifUsed = 0, notifTotal = 0;
+    
+    if (service) {
+        toPhoneUsed = MAX_RX_TOPHONE - service->toPhoneQueue.numFree();
+        toPhoneTotal = MAX_RX_TOPHONE;
+        statusUsed = MAX_RX_TOPHONE - service->toPhoneQueueStatusQueue.numFree();
+        statusTotal = MAX_RX_TOPHONE;
+        notifUsed = (MAX_RX_TOPHONE/2) - service->toPhoneClientNotificationQueue.numFree();
+        notifTotal = MAX_RX_TOPHONE/2;
+    }
+
     // Format: total/used(free:amount) - safe for long-term operation
     int result = snprintf(buffer, bufferSize,
-             "%sMem Stats: Flash=%.0f/%.0f(free:%.0f)KB Heap=%u/%u(free:%.0f)KB Nodes=%u/%u(free:%u)",
+             "%sMem: Flash=%.0f/%.0f(free:%.0f)KB Heap=%u/%u(free:%.0f)KB Nodes=%u/%u(free:%u) Queues: Phone=%u/%u Status=%u/%u Notif=%u/%u",
              prefix ? prefix : "",
              flashTotal, flashUsed, flashFree,
              heapTotal, heapUsed, heapFree,
-             maxNodes, totalNodes, freeSlots);
+             maxNodes, totalNodes, freeSlots,
+             toPhoneUsed, toPhoneTotal, statusUsed, statusTotal, notifUsed, notifTotal);
              
     // Ensure null termination for safety
     if (result >= (int)bufferSize) {
