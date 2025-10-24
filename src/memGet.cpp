@@ -54,9 +54,11 @@ uint32_t MemGet::getHeapSize()
     // This is a simplified approach - in practice, you might want to store the initial heap size
     static uint32_t initialHeapSize = 0;
     if (initialHeapSize == 0) {
-        // First call - estimate total heap size
+        // First call - get actual heap size by measuring free + used
+        uint32_t freeHeap = xPortGetFreeHeapSize();
         // nRF52840 typically has ~256KB RAM, with some used by system
-        initialHeapSize = 200 * 1024; // Conservative estimate
+        // Estimate total heap as free + some used space
+        initialHeapSize = freeHeap + (50 * 1024); // Add 50KB for used space estimate
     }
     return initialHeapSize;
 #else
