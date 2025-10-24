@@ -261,7 +261,7 @@ SO GPIO 39/TXEN MAY NOT BE DEFINED FOR SUCCESSFUL OPERATION OF THE SX1262 - TG
 #define MONITORING_PIN_CODE "123456"
 
 // Override default MAX_NUM_NODES for RAK4631 - make it dynamic
-extern const uint32_t DEFAULT_MAX_NODES;  // Safe limit for RAK4631 (250)
+extern const uint32_t DEFAULT_MAX_NODES;  // Safe limit for RAK4631 (256)
 extern uint32_t dynamic_max_nodes;        // Current limit (can only increase from default)
 #define MAX_NUM_NODES dynamic_max_nodes
 
