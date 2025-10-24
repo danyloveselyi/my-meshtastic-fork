@@ -113,6 +113,11 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
         char detailBuffer[400];
         formatDetailedMemoryStats(detailBuffer, sizeof(detailBuffer));
         replyText = detailBuffer;
+    } else if (isCommand && (strcmp(trimmed, "packets") == 0 || strcmp(trimmed, "packet") == 0)) {
+        // Create detailed packet statistics report
+        char packetBuffer[400];
+        formatPacketStats(packetBuffer, sizeof(packetBuffer));
+        replyText = packetBuffer;
     } else if (isCommand && (strcmp(trimmed, "mon start") == 0 || strcmp(trimmed, "monstart") == 0)) {
         // Start interactive setup for monitoring interval
         waitingMonStartNodeId = original.from;
@@ -419,5 +424,74 @@ void TextMessageModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     if (result >= (int)bufferSize) {
         buffer[bufferSize - 1] = '\0';
         LOG_WARN("Detailed memory stats message truncated");
+    }
+}
+
+void TextMessageModule::formatPacketStats(char* buffer, size_t bufferSize)
+{
+    // Safety check for long-term operation
+    if (!buffer || bufferSize < 300) {
+        LOG_ERROR("Invalid buffer for packet stats formatting");
+        return;
+    }
+
+    // Get packet statistics from RadioLibInterface
+    uint32_t txGood = 0, rxGood = 0, rxBad = 0, txRelay = 0;
+    float channelUtil = 0.0f, airUtilTx = 0.0f;
+    
+    if (RadioLibInterface::instance) {
+        txGood = RadioLibInterface::instance->txGood;
+        rxGood = RadioLibInterface::instance->rxGood;
+        rxBad = RadioLibInterface::instance->rxBad;
+        txRelay = RadioLibInterface::instance->txRelay;
+    }
+    
+    // Get airtime statistics
+    if (airTime) {
+        channelUtil = airTime->channelUtilizationPercent();
+        airUtilTx = airTime->utilizationTXPercent();
+    }
+    
+    // Get router statistics
+    uint32_t rxDupe = 0, txRelayCanceled = 0;
+    if (router) {
+        rxDupe = router->rxDupe;
+        txRelayCanceled = router->txRelayCanceled;
+    }
+    
+    // Get uptime
+    uint32_t uptime = getUptimeSeconds();
+    uint32_t uptimeHours = uptime / 3600;
+    uint32_t uptimeMinutes = (uptime % 3600) / 60;
+    
+    // Calculate rates (packets per minute and per hour)
+    float txRateMin = (uptime > 0) ? (txGood * 60.0f / uptime) : 0.0f;
+    float txRateHour = (uptime > 0) ? (txGood * 3600.0f / uptime) : 0.0f;
+    float rxRateMin = (uptime > 0) ? ((rxGood + rxBad) * 60.0f / uptime) : 0.0f;
+    float rxRateHour = (uptime > 0) ? ((rxGood + rxBad) * 3600.0f / uptime) : 0.0f;
+
+    // Format packet statistics report
+    int result = snprintf(buffer, bufferSize,
+        "📦 PACKET STATS\n"
+        "TX: %u total (%.1f/min %.1f/hr)\n"
+        "RX: %u good, %u bad\n"
+        "RX Rate: %.1f/min %.1f/hr\n"
+        "Relay: %u sent, %u canceled\n"
+        "Duplicates: %u\n"
+        "Channel: %.1f%% util\n"
+        "Air TX: %.1f%% util\n"
+        "Uptime: %uh %um",
+        txGood, txRateMin, txRateHour,
+        rxGood, rxBad,
+        rxRateMin, rxRateHour,
+        txRelay, txRelayCanceled,
+        rxDupe,
+        channelUtil, airUtilTx,
+        uptimeHours, uptimeMinutes);
+                 
+    // Ensure null termination for safety
+    if (result >= (int)bufferSize) {
+        buffer[bufferSize - 1] = '\0';
+        LOG_WARN("Packet stats message truncated");
     }
 }
