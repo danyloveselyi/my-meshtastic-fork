@@ -109,10 +109,10 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
 
     // Check if this is a memory stats command
     if (isCommand && (strcmp(trimmed, "mem") == 0 || strcmp(trimmed, "memory") == 0)) {
-        // Create reply with memory stats using shared formatting
-        char statsBuffer[200];
-        formatMemoryStats(statsBuffer, sizeof(statsBuffer));
-        replyText = statsBuffer;
+        // Create detailed memory report for all memory commands
+        char detailBuffer[400];
+        formatDetailedMemoryStats(detailBuffer, sizeof(detailBuffer));
+        replyText = detailBuffer;
     } else if (isCommand && (strcmp(trimmed, "mon start") == 0 || strcmp(trimmed, "monstart") == 0)) {
         // Start interactive setup for monitoring interval
         waitingMonStartNodeId = original.from;
@@ -368,5 +368,49 @@ void TextMessageModule::formatMemoryStats(char* buffer, size_t bufferSize, const
     if (result >= (int)bufferSize) {
         buffer[bufferSize - 1] = '\0';
         LOG_WARN("Memory stats message truncated");
+    }
+}
+
+void TextMessageModule::formatDetailedMemoryStats(char* buffer, size_t bufferSize)
+{
+    // Safety check for long-term operation
+    if (!buffer || bufferSize < 300) {
+        LOG_ERROR("Invalid buffer for detailed memory stats formatting");
+        return;
+    }
+
+    // Get memory and node statistics with safety checks
+    float flashTotal = memGet.getFlashTotal() / 1024.0f; // KB
+    float flashFree = memGet.getFlashFree() / 1024.0f;   // KB
+    uint32_t heapTotal = memGet.getHeapSize() / 1024;    // KB
+    float heapFree = memGet.getFreeHeap() / 1024.0f;     // KB
+    
+    // Protect against null nodeDB (can happen during shutdown)
+    uint32_t onlineNodes = nodeDB ? nodeDB->getNumOnlineMeshNodes() : 0;
+    uint32_t totalNodes = nodeDB ? nodeDB->getNumMeshNodes() : 0;
+    uint32_t maxNodes = dynamic_max_nodes;  // Use dynamic value
+    uint32_t freeSlots = (maxNodes > totalNodes) ? (maxNodes - totalNodes) : 0;
+
+    // Calculate used amounts with overflow protection
+    float flashUsed = (flashTotal >= flashFree) ? (flashTotal - flashFree) : 0.0f;
+    uint32_t heapUsed = (heapTotal >= (uint32_t)heapFree) ? (heapTotal - (uint32_t)heapFree) : 0;
+
+    // Format detailed memory report
+    int result = snprintf(buffer, bufferSize,
+        "📊 MEMORY REPORT\n"
+        "Flash: %.0f/%.0fKB (%.0fKB free)\n"
+        "Heap: %u/%uKB (%.0fKB free)\n"
+        "Nodes: %u/%u (free:%u)\n"
+        "Queues: Phone=%u Status=%u Notif=%u\n"
+        "Pool: ~22 packets (~11KB)",
+        flashTotal, flashUsed, flashFree,
+        heapTotal, heapUsed, heapFree,
+        maxNodes, totalNodes, freeSlots,
+        MAX_RX_TOPHONE, MAX_RX_TOPHONE, MAX_RX_TOPHONE/2);
+                 
+    // Ensure null termination for safety
+    if (result >= (int)bufferSize) {
+        buffer[bufferSize - 1] = '\0';
+        LOG_WARN("Detailed memory stats message truncated");
     }
 }

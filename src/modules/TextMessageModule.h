@@ -26,6 +26,7 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
       void sendAutoReply(const meshtastic_MeshPacket &original);
       void sendMemoryStats(uint32_t toNode);
       void formatMemoryStats(char* buffer, size_t bufferSize, const char* prefix = "");
+      void formatDetailedMemoryStats(char* buffer, size_t bufferSize);
 
       // Monitoring variables
       uint32_t monitoringNodeId = 0;  // Node ID that requested monitoring (0 = disabled)
