@@ -149,7 +149,7 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
     } else if (isCommand && (strcmp(trimmed, "help") == 0 || strcmp(trimmed, "?") == 0 || strcmp(trimmed, "commands") == 0)) {
         // Show available commands with safety note
         snprintf(replyBuffer, sizeof(replyBuffer), 
-                 "Commands: /mem /monstart /monstop /maxnodes /setmaxnodes /help. Note: setmaxnodes can only increase (safe default: %u)", 
+                 "Commands: /mem /packets /monstart /monstop /maxnodes /setmaxnodes /help. Note: setmaxnodes can only increase (safe default: %u)", 
                  DEFAULT_MAX_NODES);
         replyText = replyBuffer;
     } else if (waitingSetMaxNodesNodeId == original.from) {
