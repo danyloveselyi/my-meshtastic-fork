@@ -31,7 +31,7 @@ const uint32_t g_ADigitalPinMap[] = {
     32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47};
 
 // Default maximum nodes for RAK4631 - can be changed via admin command
-const uint32_t DEFAULT_MAX_NODES = 350;  // Minimum safe limit: 350 nodes (was 240)
+const uint32_t DEFAULT_MAX_NODES = 120;  // Safe limit for RAK4631: 120 nodes (30KB RAM)
 uint32_t dynamic_max_nodes = DEFAULT_MAX_NODES;  // Current limit - can be increased but not decreased below default
 
 void initVariant()

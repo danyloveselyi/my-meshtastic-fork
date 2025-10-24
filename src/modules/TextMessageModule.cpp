@@ -156,14 +156,27 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
             waitingSetMaxNodesNodeId = 0;
             replyText = "Failed: PIN code incorrect.";
         } else if (maxNodes >= DEFAULT_MAX_NODES && maxNodes <= 1000) {
-            dynamic_max_nodes = maxNodes;
-            if (nodeDB && nodeDB->meshNodes) {
-                nodeDB->meshNodes->resize(dynamic_max_nodes);
+            // Check if we have enough memory for the increase
+            uint32_t currentNodes = nodeDB ? nodeDB->meshNodes->size() : 0;
+            uint32_t additionalMemory = (maxNodes - currentNodes) * 250; // ~250 bytes per node
+            uint32_t freeHeap = memGet.getFreeHeap();
+            
+            if (freeHeap < additionalMemory + 4096) { // Keep 4KB safety margin
+                waitingSetMaxNodesNodeId = 0;
+                snprintf(replyBuffer, sizeof(replyBuffer), 
+                         "Error: Not enough memory. Need %u bytes, have %u free. Current: %u nodes.", 
+                         additionalMemory, freeHeap, currentNodes);
+                replyText = replyBuffer;
+            } else {
+                dynamic_max_nodes = maxNodes;
+                if (nodeDB && nodeDB->meshNodes) {
+                    nodeDB->meshNodes->resize(dynamic_max_nodes);
+                }
+                waitingSetMaxNodesNodeId = 0;
+                snprintf(replyBuffer, sizeof(replyBuffer), "Max nodes increased to %d. Memory usage: ~%.1fKB.", 
+                         maxNodes, (maxNodes * 250) / 1024.0f);
+                replyText = replyBuffer;
             }
-            waitingSetMaxNodesNodeId = 0;
-            snprintf(replyBuffer, sizeof(replyBuffer), "Max nodes increased to %d. Memory usage: ~%.1fKB.", 
-                     maxNodes, (maxNodes * 250) / 1024.0f);
-            replyText = replyBuffer;
         } else if (maxNodes < DEFAULT_MAX_NODES) {
             waitingSetMaxNodesNodeId = 0;
             snprintf(replyBuffer, sizeof(replyBuffer), 
@@ -219,7 +232,14 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
     }
 
     meshtastic_MeshPacket *reply = router->allocForSending();
-    if (!reply) return;
+    if (!reply) {
+        LOG_ERROR("Failed to allocate packet - memory exhausted! Resetting command states.");
+        // Reset all waiting states to prevent hanging
+        waitingSetMaxNodesNodeId = 0;
+        waitingMonStartNodeId = 0;
+        waitingMonStopNodeId = 0;
+        return;
+    }
 
     reply->to = original.from;
     reply->decoded.want_response = false;
@@ -251,8 +271,9 @@ void TextMessageModule::sendMemoryStats(uint32_t toNode)
     // Allocate packet with safety check for long-term monitoring
     meshtastic_MeshPacket *reply = router->allocForSending();
     if (!reply) {
-        LOG_ERROR("Failed to allocate packet for memory stats - monitoring may need restart");
-        // Don't reset monitoring automatically to avoid infinite loops
+        LOG_ERROR("Failed to allocate packet for memory stats - memory exhausted! Disabling monitoring.");
+        // Disable monitoring to prevent further memory allocation attempts
+        monitoringNodeId = 0;
         return;
     }
 
