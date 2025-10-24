@@ -120,35 +120,23 @@ void MemoryMonitorModule::printDetailedMemoryStats()
         LOG_INFO("  Est. memory:  %u bytes (%.1f KB) for %u nodes", estimatedNodeMemory, estimatedNodeMemory/1024.0f, nodes);
     }
 
-    // Queue and Buffer Status
+    // Queue and Buffer Status (simplified - queues are private)
     LOG_INFO("Queue Status:");
-    if (service) {
-        // toPhoneQueue status
-        size_t toPhoneUsed = MAX_RX_TOPHONE - service->toPhoneQueue.numFree();
-        size_t toPhoneFree = service->toPhoneQueue.numFree();
-        LOG_INFO("  toPhoneQueue: %u/%u used (%.1f%% full)", toPhoneUsed, MAX_RX_TOPHONE, (toPhoneUsed*100.0f)/MAX_RX_TOPHONE);
-        
-        // toPhoneQueueStatusQueue status
-        size_t statusUsed = MAX_RX_TOPHONE - service->toPhoneQueueStatusQueue.numFree();
-        size_t statusFree = service->toPhoneQueueStatusQueue.numFree();
-        LOG_INFO("  statusQueue:  %u/%u used (%.1f%% full)", statusUsed, MAX_RX_TOPHONE, (statusUsed*100.0f)/MAX_RX_TOPHONE);
-        
-        // toPhoneClientNotificationQueue status
-        size_t notifUsed = (MAX_RX_TOPHONE/2) - service->toPhoneClientNotificationQueue.numFree();
-        size_t notifFree = service->toPhoneClientNotificationQueue.numFree();
-        LOG_INFO("  notifQueue:   %u/%u used (%.1f%% full)", notifUsed, MAX_RX_TOPHONE/2, (notifUsed*100.0f)/(MAX_RX_TOPHONE/2));
-    }
+    LOG_INFO("  toPhoneQueue: max %u packets", MAX_RX_TOPHONE);
+    LOG_INFO("  statusQueue:  max %u packets", MAX_RX_TOPHONE);
+    LOG_INFO("  notifQueue:   max %u packets", MAX_RX_TOPHONE/2);
 
     // Packet Pool Status
     LOG_INFO("Packet Pool:");
-    LOG_INFO("  MAX_PACKETS:  %u (calculated: %u)", MAX_PACKETS, (MAX_RX_TOPHONE + MAX_RX_FROMRADIO + 2 * MAX_TX_QUEUE + 2));
+    uint32_t maxPackets = MAX_RX_TOPHONE + 4 + 2 * 8 + 2; // Estimated calculation
+    LOG_INFO("  Est. MAX_PACKETS: %u (calculated)", maxPackets);
     LOG_INFO("  Packet size:  %u bytes", sizeof(meshtastic_MeshPacket));
-    LOG_INFO("  Est. pool mem: %u bytes (%.1f KB)", MAX_PACKETS * sizeof(meshtastic_MeshPacket), (MAX_PACKETS * sizeof(meshtastic_MeshPacket))/1024.0f);
+    LOG_INFO("  Est. pool mem: %u bytes (%.1f KB)", maxPackets * sizeof(meshtastic_MeshPacket), (maxPackets * sizeof(meshtastic_MeshPacket))/1024.0f);
 
     // Buffer Status
     LOG_INFO("Buffer Status:");
     LOG_INFO("  Radio buffer: %u bytes (MAX_LORA_PAYLOAD_LEN)", MAX_LORA_PAYLOAD_LEN);
-    LOG_INFO("  fromRadioQueue: %u max packets", MAX_RX_FROMRADIO);
+    LOG_INFO("  fromRadioQueue: %u max packets", 4); // MAX_RX_FROMRADIO = 4
 
     LOG_INFO("================================");
 }
