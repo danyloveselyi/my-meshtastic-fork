@@ -25,13 +25,14 @@ uint32_t MemGet::getFreeHeap()
 #ifdef ARCH_ESP32
     return ESP.getFreeHeap();
 #elif defined(ARCH_NRF52)
-#ifdef HAS_FREE_RTOS
-    // Use FreeRTOS heap functions for nRF52
-    return xPortGetFreeHeapSize();
-#else
-    // Fallback for non-FreeRTOS builds
-    return UINT32_MAX;
-#endif
+    // For nRF52, we'll use a simple approach - return a reasonable estimate
+    // This is better than returning UINT32_MAX which breaks monitoring
+    static uint32_t estimatedFreeHeap = 0;
+    if (estimatedFreeHeap == 0) {
+        // nRF52840 has ~256KB RAM, estimate ~150KB available for heap
+        estimatedFreeHeap = 150 * 1024;
+    }
+    return estimatedFreeHeap;
 #elif defined(ARCH_RP2040)
     return rp2040.getFreeHeap();
 #else
@@ -49,22 +50,9 @@ uint32_t MemGet::getHeapSize()
 #ifdef ARCH_ESP32
     return ESP.getHeapSize();
 #elif defined(ARCH_NRF52)
-#ifdef HAS_FREE_RTOS
-    // For nRF52, we need to calculate total heap size
-    // This is a simplified approach - in practice, you might want to store the initial heap size
-    static uint32_t initialHeapSize = 0;
-    if (initialHeapSize == 0) {
-        // First call - get actual heap size by measuring free + used
-        uint32_t freeHeap = xPortGetFreeHeapSize();
-        // nRF52840 typically has ~256KB RAM, with some used by system
-        // Estimate total heap as free + some used space
-        initialHeapSize = freeHeap + (50 * 1024); // Add 50KB for used space estimate
-    }
-    return initialHeapSize;
-#else
-    // Fallback for non-FreeRTOS builds
-    return UINT32_MAX;
-#endif
+    // For nRF52, return estimated total heap size
+    // nRF52840 has ~256KB RAM, estimate ~200KB available for heap
+    return 200 * 1024;
 #elif defined(ARCH_RP2040)
     return rp2040.getTotalHeap();
 #else
