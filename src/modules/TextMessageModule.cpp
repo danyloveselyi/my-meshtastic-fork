@@ -21,6 +21,9 @@ void trim(char* s) {
 #include "memGet.h"
 #include "mesh/mesh-pb-constants.h"
 #include "variant.h"
+#include "RadioLibInterface.h"
+#include "airtime.h"
+#include "modules/Telemetry/DeviceTelemetry.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -459,8 +462,9 @@ void TextMessageModule::formatPacketStats(char* buffer, size_t bufferSize)
         txRelayCanceled = router->txRelayCanceled;
     }
     
-    // Get uptime
-    uint32_t uptime = getUptimeSeconds();
+    // Get uptime using millis()
+    uint32_t uptimeMs = millis();
+    uint32_t uptime = uptimeMs / 1000;
     uint32_t uptimeHours = uptime / 3600;
     uint32_t uptimeMinutes = (uptime % 3600) / 60;
     
