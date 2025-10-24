@@ -262,11 +262,15 @@ void TextMessageModule::sendMemoryStats(uint32_t toNode)
     monitorMessageCounter++;
     // Counter will safely overflow from UINT32_MAX back to 0 after ~136 years at 30s intervals
 
-    // Format monitoring message with counter in square brackets using shared formatting
-    char statsBuffer[200];
+    // Format monitoring message with counter in square brackets using detailed formatting
+    char statsBuffer[400];
     char prefix[20];
     snprintf(prefix, sizeof(prefix), "[ %u ] ", monitorMessageCounter);
-    formatMemoryStats(statsBuffer, sizeof(statsBuffer), prefix);
+    formatDetailedMemoryStats(statsBuffer, sizeof(statsBuffer));
+    
+    // Add prefix to the detailed report
+    char prefixedBuffer[450];
+    snprintf(prefixedBuffer, sizeof(prefixedBuffer), "%s%s", prefix, statsBuffer);
 
     // Allocate packet with safety check for long-term monitoring
     meshtastic_MeshPacket *reply = router->allocForSending();
@@ -281,9 +285,9 @@ void TextMessageModule::sendMemoryStats(uint32_t toNode)
     reply->decoded.want_response = false;
     reply->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
 
-    size_t msgLen = strlen(statsBuffer);
+    size_t msgLen = strlen(prefixedBuffer);
     reply->decoded.payload.size = std::min(msgLen, sizeof(reply->decoded.payload.bytes));
-    memcpy(reply->decoded.payload.bytes, statsBuffer, reply->decoded.payload.size);
+    memcpy(reply->decoded.payload.bytes, prefixedBuffer, reply->decoded.payload.size);
 
     service->sendToMesh(reply, RX_SRC_LOCAL, true);
 }
@@ -407,6 +411,9 @@ void TextMessageModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
         heapTotal, heapUsed, heapFree,
         maxNodes, totalNodes, freeSlots,
         MAX_RX_TOPHONE, MAX_RX_TOPHONE, MAX_RX_TOPHONE/2);
+        
+    // Debug log to verify the message is being formatted correctly
+    LOG_INFO("Formatted detailed memory stats: %s", buffer);
                  
     // Ensure null termination for safety
     if (result >= (int)bufferSize) {
