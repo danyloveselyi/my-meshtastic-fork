@@ -27,7 +27,9 @@ void trim(char* s) {
 #include "modules/Telemetry/DeviceTelemetry.h"
 #include "PowerStatus.h"
 #include "mesh/PacketHistory.h"
+#include "RTC.h"
 #include <algorithm>
+#include <time.h>
 
 extern Router *router;
 
@@ -704,19 +706,62 @@ void DeviceStatsModule::formatNodesInfo(char* buffer, size_t bufferSize)
     float usagePercent = (maxNodes > 0) ? (totalNodes * 100.0f / maxNodes) : 0.0f;
     float onlinePercent = (totalNodes > 0) ? (onlineNodes * 100.0f / totalNodes) : 0.0f;
     
-    // Format nodes information report
+    // Diagnostic info: check time sync and last_heard values
+    uint32_t currentTime = getValidTime(RTCQualityDevice, true); // Get current time (unix timestamp)
+    uint32_t nodesWithZeroTime = 0;
+    uint32_t recentNodes = 0; // seen < 10 min
+    
+    // Calculate uptime
+    uint32_t uptimeSeconds = millis() / 1000;
+    uint32_t uptimeDays = uptimeSeconds / 86400;
+    uint32_t uptimeHours = (uptimeSeconds % 86400) / 3600;
+    uint32_t uptimeMinutes = (uptimeSeconds % 3600) / 60;
+    
+    if (nodeDB) {
+        for (int i = 0; i < totalNodes; i++) {
+            meshtastic_NodeInfoLite *node = nodeDB->getMeshNodeByIndex(i);
+            if (!node) continue;
+            
+            if (node->last_heard == 0) {
+                nodesWithZeroTime++;
+            }
+            uint32_t delta = currentTime > node->last_heard ? 
+                            (currentTime - node->last_heard) : 0;
+            if (delta < 600) { // < 10 minutes
+                recentNodes++;
+            }
+        }
+    }
+    
+    // Format time string (readable)
+    char timeStr[32];
+    if (currentTime > 0 && currentTime < 2000000000) {
+        // Time looks valid (between 2001 and 2033)
+        struct tm *timeinfo = localtime((time_t*)&currentTime);
+        strftime(timeStr, sizeof(timeStr), "%H:%M:%S", timeinfo);
+    } else {
+        snprintf(timeStr, sizeof(timeStr), "Not synced");
+    }
+    
+    // Format nodes information report with diagnostic data
     int result = snprintf(buffer, bufferSize,
         "🌐 NETWORK NODES\n"
-        "Online: %u (%.0f%%)\n"
+        "Online: %u (%.0f%%) [<2h]\n"
+        "Recent: %u (<10m)\n"
         "Offline: %u\n"
         "Total: %u / %u (%.0f%%)\n"
         "Free slots: %u\n"
-        "Default max: %u",
+        "⏰ Uptime: %ud %uh %um\n"
+        "🕐 Time: %s\n"
+        "⚠️ No time: %u nodes",
         onlineNodes, onlinePercent,
+        recentNodes,
         offlineNodes,
         totalNodes, maxNodes, usagePercent,
         freeSlots,
-        DEFAULT_MAX_NODES);
+        uptimeDays, uptimeHours, uptimeMinutes,
+        timeStr,
+        nodesWithZeroTime);
                  
     // Ensure null termination for safety
     if (result >= (int)bufferSize) {
