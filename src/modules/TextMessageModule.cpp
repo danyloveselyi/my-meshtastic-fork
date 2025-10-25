@@ -749,34 +749,42 @@ void TextMessageModule::formatDebugInfo(char* buffer, size_t bufferSize)
     // Get PacketHistory (DupeCache) statistics
     uint32_t dupeCacheCount = 0;
     uint32_t oldestPacketAge = 0;
-    uint32_t newestPacketAge = 0;
-    uint32_t averagePacketAge = 0;
     
     if (router) {
         dupeCacheCount = router->getPacketCount();
         oldestPacketAge = router->getOldestPacketAge();
-        newestPacketAge = router->getNewestPacketAge();
-        averagePacketAge = router->getAveragePacketAge();
     }
     
-    // Format debug information report with real network queue data and packet history stats
+    // Determine criticality based on oldest packet age and cache fullness
+    const char* criticalityWarning = "";
+    uint32_t cacheFullness = (dynamic_max_nodes > 0) ? (dupeCacheCount * 100 / dynamic_max_nodes) : 0;
+    
+    if (oldestPacketAge < 90 && dupeCacheCount > 200) {
+        criticalityWarning = "\n⚠️ CRITICAL: Packets <90s evicted!";
+    } else if (oldestPacketAge < 120 && dupeCacheCount > 230) {
+        criticalityWarning = "\n⚠️ WARNING: DupeCache filling fast";
+    } else if (cacheFullness > 85) {
+        criticalityWarning = "\n⚠️ DupeCache >85% full";
+    }
+    
+    // Format debug information report focusing on oldest packet age (most critical metric)
     int result = snprintf(buffer, bufferSize,
         "🔧 DEBUG INFO\n"
         "Heap: %u/%uKB (%u%%)\n"
         "Nodes: %u online / %u total\n"
         "NodeDB: ~%uKB (%u×250b)\n"
-        "DupeCache: %u pkts (%uKB)\n"
-        "Packet ages: %us old, %us new, %us avg\n"
+        "DupeCache: %u/%u pkts (%u%%)\n"
+        "📌 Oldest packet: %us ago\n"
         "RX Q: %d/%d (free:%d)\n"
-        "TX Q: %d/%d (free:%d)\n"
-        "⚠️ High traffic → full queues",
+        "TX Q: %d/%d (free:%d)%s",
         usedHeap/1024, totalHeap/1024, heapPercent,
         onlineNodes, totalNodes,
         nodeDbBytes/1024, totalNodes,
-        dupeCacheCount, (dupeCacheCount * 16) / 1024,
-        oldestPacketAge, newestPacketAge, averagePacketAge,
+        dupeCacheCount, dynamic_max_nodes, cacheFullness,
+        oldestPacketAge,
         fromRadioUsed, fromRadioMax, fromRadioFree,
-        txUsed, txMax, txStatus.free);
+        txUsed, txMax, txStatus.free,
+        criticalityWarning);
                  
     // Ensure null termination for safety
     if (result >= (int)bufferSize) {
