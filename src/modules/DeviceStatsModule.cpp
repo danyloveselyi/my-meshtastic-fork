@@ -708,6 +708,7 @@ void DeviceStatsModule::formatNodesInfo(char* buffer, size_t bufferSize)
     
     // Diagnostic info: check time sync and last_heard values
     uint32_t currentTime = getValidTime(RTCQualityDevice, true); // Get current time (unix timestamp)
+    bool timeValid = (currentTime > 1000000000 && currentTime < 2000000000); // Valid range: 2001-2033
     uint32_t nodesWithZeroTime = 0;
     uint32_t recentNodes = 0; // seen < 10 min
     
@@ -717,26 +718,36 @@ void DeviceStatsModule::formatNodesInfo(char* buffer, size_t bufferSize)
     uint32_t uptimeHours = (uptimeSeconds % 86400) / 3600;
     uint32_t uptimeMinutes = (uptimeSeconds % 3600) / 60;
     
-    if (nodeDB) {
+    // Only calculate recent/online if time is valid
+    if (nodeDB && timeValid) {
         for (int i = 0; i < totalNodes; i++) {
             meshtastic_NodeInfoLite *node = nodeDB->getMeshNodeByIndex(i);
             if (!node) continue;
             
             if (node->last_heard == 0) {
                 nodesWithZeroTime++;
+            } else {
+                uint32_t delta = currentTime > node->last_heard ? 
+                                (currentTime - node->last_heard) : 0;
+                if (delta < 600) { // < 10 minutes
+                    recentNodes++;
+                }
             }
-            uint32_t delta = currentTime > node->last_heard ? 
-                            (currentTime - node->last_heard) : 0;
-            if (delta < 600) { // < 10 minutes
-                recentNodes++;
+        }
+    } else if (nodeDB) {
+        // Time invalid - count nodes with zero time
+        for (int i = 0; i < totalNodes; i++) {
+            meshtastic_NodeInfoLite *node = nodeDB->getMeshNodeByIndex(i);
+            if (!node) continue;
+            if (node->last_heard == 0) {
+                nodesWithZeroTime++;
             }
         }
     }
     
     // Format time string (readable)
     char timeStr[32];
-    if (currentTime > 0 && currentTime < 2000000000) {
-        // Time looks valid (between 2001 and 2033)
+    if (timeValid) {
         struct tm *timeinfo = localtime((time_t*)&currentTime);
         strftime(timeStr, sizeof(timeStr), "%H:%M:%S", timeinfo);
     } else {
@@ -744,24 +755,42 @@ void DeviceStatsModule::formatNodesInfo(char* buffer, size_t bufferSize)
     }
     
     // Format nodes information report with diagnostic data
-    int result = snprintf(buffer, bufferSize,
-        "🌐 NETWORK NODES\n"
-        "Online: %u (%.0f%%) [<2h]\n"
-        "Recent: %u (<10m)\n"
-        "Offline: %u\n"
-        "Total: %u / %u (%.0f%%)\n"
-        "Free slots: %u\n"
-        "⏰ Uptime: %ud %uh %um\n"
-        "🕐 Time: %s\n"
-        "⚠️ No time: %u nodes",
-        onlineNodes, onlinePercent,
-        recentNodes,
-        offlineNodes,
-        totalNodes, maxNodes, usagePercent,
-        freeSlots,
-        uptimeDays, uptimeHours, uptimeMinutes,
-        timeStr,
-        nodesWithZeroTime);
+    int result;
+    if (timeValid) {
+        // Show online/recent stats if time is valid
+        result = snprintf(buffer, bufferSize,
+            "🌐 NETWORK NODES\n"
+            "Online: %u (%.0f%%) [<2h]\n"
+            "Recent: %u (<10m)\n"
+            "Offline: %u\n"
+            "Total: %u / %u (%.0f%%)\n"
+            "Free slots: %u\n"
+            "⏰ Uptime: %ud %uh %um\n"
+            "🕐 Time: %s\n"
+            "⚠️ No time: %u nodes",
+            onlineNodes, onlinePercent,
+            recentNodes,
+            offlineNodes,
+            totalNodes, maxNodes, usagePercent,
+            freeSlots,
+            uptimeDays, uptimeHours, uptimeMinutes,
+            timeStr,
+            nodesWithZeroTime);
+    } else {
+        // Time not synced - show simplified stats
+        result = snprintf(buffer, bufferSize,
+            "🌐 NETWORK NODES\n"
+            "Total: %u / %u (%.0f%%)\n"
+            "Free slots: %u\n"
+            "⏰ Uptime: %ud %uh %um\n"
+            "🕐 Time: %s\n"
+            "⚠️ Time not synced\n"
+            "Cannot determine online/offline",
+            totalNodes, maxNodes, usagePercent,
+            freeSlots,
+            uptimeDays, uptimeHours, uptimeMinutes,
+            timeStr);
+    }
                  
     // Ensure null termination for safety
     if (result >= (int)bufferSize) {
