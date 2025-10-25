@@ -65,4 +65,10 @@ class PacketHistory
 
     // Remove a relayer from the list of relayers of a packet in the history given an ID and sender
     void removeRelayer(const uint8_t relayer, const uint32_t id, const NodeNum sender);
+
+    // Statistics methods for monitoring packet history
+    uint32_t getPacketCount() const;
+    uint32_t getOldestPacketAge() const;  // Age of oldest packet in seconds
+    uint32_t getNewestPacketAge() const;  // Age of newest packet in seconds
+    uint32_t getAveragePacketAge() const; // Average age of all packets in seconds
 };

@@ -156,3 +156,61 @@ void PacketHistory::removeRelayer(const uint8_t relayer, const uint32_t id, cons
     recentPackets.erase(found);
     recentPackets.insert(r);
 }
+
+// Statistics methods for monitoring packet history
+uint32_t PacketHistory::getPacketCount() const
+{
+    return recentPackets.size();
+}
+
+uint32_t PacketHistory::getOldestPacketAge() const
+{
+    if (recentPackets.empty()) {
+        return 0;
+    }
+    
+    uint32_t currentTime = millis();
+    uint32_t oldestTime = currentTime;
+    
+    for (const auto& packet : recentPackets) {
+        if (packet.rxTimeMsec < oldestTime) {
+            oldestTime = packet.rxTimeMsec;
+        }
+    }
+    
+    return (currentTime - oldestTime) / 1000; // Convert to seconds
+}
+
+uint32_t PacketHistory::getNewestPacketAge() const
+{
+    if (recentPackets.empty()) {
+        return 0;
+    }
+    
+    uint32_t currentTime = millis();
+    uint32_t newestTime = 0;
+    
+    for (const auto& packet : recentPackets) {
+        if (packet.rxTimeMsec > newestTime) {
+            newestTime = packet.rxTimeMsec;
+        }
+    }
+    
+    return (currentTime - newestTime) / 1000; // Convert to seconds
+}
+
+uint32_t PacketHistory::getAveragePacketAge() const
+{
+    if (recentPackets.empty()) {
+        return 0;
+    }
+    
+    uint32_t currentTime = millis();
+    uint32_t totalAge = 0;
+    
+    for (const auto& packet : recentPackets) {
+        totalAge += (currentTime - packet.rxTimeMsec);
+    }
+    
+    return (totalAge / recentPackets.size()) / 1000; // Convert to seconds
+}

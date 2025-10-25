@@ -725,33 +725,58 @@ void TextMessageModule::formatDebugInfo(char* buffer, size_t bufferSize)
     uint32_t usedHeap = totalHeap - freeHeap;
     uint32_t heapPercent = (totalHeap > 0) ? (usedHeap * 100 / totalHeap) : 0;
     
-    // Calculate PacketHistory memory usage
-    // Each PacketRecord = ~16 bytes, reserves dynamic_max_nodes entries
-    uint32_t maxHistoryRecords = dynamic_max_nodes;
-    uint32_t historyBytes = maxHistoryRecords * 16;
+    // Get actual node counts (not just max)
+    uint32_t totalNodes = nodeDB ? nodeDB->getNumMeshNodes() : 0;
+    uint32_t onlineNodes = nodeDB ? nodeDB->getNumOnlineMeshNodes() : 0;
     
-    // Calculate NodeDB memory usage
-    // Each node = ~250 bytes
-    uint32_t nodeDbBytes = dynamic_max_nodes * 250;
+    // Calculate actual NodeDB memory usage
+    uint32_t nodeDbBytes = totalNodes * 250;  // Real memory usage based on actual nodes
     
-    // Get queue sizes
-    uint32_t maxTxQueue = 16;      // MAX_TX_QUEUE
-    uint32_t maxFromRadio = 4;     // MAX_RX_FROMRADIO
-    uint32_t maxToPhone = MAX_RX_TOPHONE;  // 32
+    // Calculate PacketHistory memory - used for duplicate detection
+    // PacketHistory stores seen packets for 10 min to prevent duplicates
+    uint32_t historyReserved = dynamic_max_nodes * 16;
     
-    // Format debug information report - optimized for diagnostics
+    // Get actual network queue usage (critical for mesh stability)
+    int fromRadioUsed = router ? router->getFromRadioQueueSize() : 0;
+    int fromRadioFree = router ? router->getFromRadioQueueFree() : 4;
+    int fromRadioMax = 4;  // MAX_RX_FROMRADIO
+    
+    // Get TX queue status (network transmission queue)
+    meshtastic_QueueStatus txStatus = router ? router->getQueueStatus() : meshtastic_QueueStatus{0, 0, 0, 0};
+    int txUsed = (txStatus.maxlen > txStatus.free) ? (txStatus.maxlen - txStatus.free) : 0;
+    int txMax = txStatus.maxlen > 0 ? txStatus.maxlen : 16;
+    
+    // Get PacketHistory (DupeCache) statistics
+    uint32_t dupeCacheCount = 0;
+    uint32_t oldestPacketAge = 0;
+    uint32_t newestPacketAge = 0;
+    uint32_t averagePacketAge = 0;
+    
+    if (router) {
+        dupeCacheCount = router->getPacketCount();
+        oldestPacketAge = router->getOldestPacketAge();
+        newestPacketAge = router->getNewestPacketAge();
+        averagePacketAge = router->getAveragePacketAge();
+    }
+    
+    // Format debug information report with real network queue data and packet history stats
     int result = snprintf(buffer, bufferSize,
         "🔧 DEBUG INFO\n"
         "Heap: %u/%uKB (%u%%)\n"
-        "PacketHist: ~%uKB (%u recs)\n"
-        "NodeDB: ~%uKB (%u nodes)\n"
-        "Queues: TX=%u RX=%u ToPhone=%u\n"
-        "⚠️ PacketHist grows with traffic\n"
-        "⚠️ NodeDB grows with node count",
+        "Nodes: %u online / %u total\n"
+        "NodeDB: ~%uKB (%u×250b)\n"
+        "DupeCache: %u pkts (%uKB)\n"
+        "Packet ages: %us old, %us new, %us avg\n"
+        "RX Q: %d/%d (free:%d)\n"
+        "TX Q: %d/%d (free:%d)\n"
+        "⚠️ High traffic → full queues",
         usedHeap/1024, totalHeap/1024, heapPercent,
-        historyBytes/1024, maxHistoryRecords,
-        nodeDbBytes/1024, dynamic_max_nodes,
-        maxTxQueue, maxFromRadio, maxToPhone);
+        onlineNodes, totalNodes,
+        nodeDbBytes/1024, totalNodes,
+        dupeCacheCount, (dupeCacheCount * 16) / 1024,
+        oldestPacketAge, newestPacketAge, averagePacketAge,
+        fromRadioUsed, fromRadioMax, fromRadioFree,
+        txUsed, txMax, txStatus.free);
                  
     // Ensure null termination for safety
     if (result >= (int)bufferSize) {
