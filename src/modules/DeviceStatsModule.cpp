@@ -1,4 +1,5 @@
 #include <cctype>
+#include <cstring>
 
 // Helper: trim leading/trailing whitespace in-place
 void trim(char* s) {
@@ -27,10 +28,16 @@ void trim(char* s) {
 #include "PowerStatus.h"
 #include "mesh/PacketHistory.h"
 #include <algorithm>
-#include <cctype>
-#include <cstring>
 
 extern Router *router;
+
+// dynamic_max_nodes defined in DynamicNodes.cpp with weak linkage
+// Variants can override by defining in variant.cpp
+extern const uint32_t DEFAULT_MAX_NODES;
+extern uint32_t dynamic_max_nodes;
+
+// Hardcoded PIN code for device stats module
+static const char* MONITORING_PIN_CODE = "123456";
 
 // Context variables for interactive commands (per user)
 // For /setmaxnodes: waiting for nodes,pin
@@ -387,7 +394,6 @@ void DeviceStatsModule::formatMemoryStats(char* buffer, size_t bufferSize, const
     float heapFree = memGet.getFreeHeap() / 1024.0f;     // KB
     
     // Protect against null nodeDB (can happen during shutdown)
-    uint32_t onlineNodes = nodeDB ? nodeDB->getNumOnlineMeshNodes() : 0;
     uint32_t totalNodes = nodeDB ? nodeDB->getNumMeshNodes() : 0;
     uint32_t maxNodes = dynamic_max_nodes;  // Use dynamic value
     uint32_t freeSlots = (maxNodes > totalNodes) ? (maxNodes - totalNodes) : 0;
@@ -739,10 +745,6 @@ void DeviceStatsModule::formatDebugInfo(char* buffer, size_t bufferSize)
     
     // Calculate actual NodeDB memory usage
     uint32_t nodeDbBytes = totalNodes * 250;  // Real memory usage based on actual nodes
-    
-    // Calculate PacketHistory memory - used for duplicate detection
-    // PacketHistory stores seen packets for 10 min to prevent duplicates
-    uint32_t historyReserved = dynamic_max_nodes * 16;
     
     // Get actual network queue usage (critical for mesh stability)
     int fromRadioUsed = router ? router->getFromRadioQueueSize() : 0;

@@ -33,6 +33,11 @@
 #include <pb_encode.h>
 #include <vector>
 
+// dynamic_max_nodes defined in DynamicNodes.cpp with weak linkage
+// Variants can override by defining in variant.cpp
+extern const uint32_t DEFAULT_MAX_NODES;
+extern uint32_t dynamic_max_nodes;
+
 #ifdef ARCH_ESP32
 #if HAS_WIFI
 #include "mesh/wifi/WiFiAPClient.h"
