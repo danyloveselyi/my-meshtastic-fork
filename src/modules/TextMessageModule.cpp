@@ -112,42 +112,31 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
         }
     }
 
+    // Use a single static buffer to avoid stack overflow (instead of multiple 400-byte buffers on stack)
+    static char commandBuffer[300];  // Static buffer shared by all commands
+    
     // Check if this is a memory stats command
     if (isCommand && (strcmp(trimmed, "mem") == 0 || strcmp(trimmed, "memory") == 0)) {
-        // Create detailed memory report for all memory commands
-        char detailBuffer[400];
-        formatDetailedMemoryStats(detailBuffer, sizeof(detailBuffer));
-        replyText = detailBuffer;
+        formatDetailedMemoryStats(commandBuffer, sizeof(commandBuffer));
+        replyText = commandBuffer;
     } else if (isCommand && (strcmp(trimmed, "packets") == 0 || strcmp(trimmed, "packet") == 0)) {
-        // Create detailed packet statistics report
-        char packetBuffer[400];
-        formatPacketStats(packetBuffer, sizeof(packetBuffer));
-        replyText = packetBuffer;
+        formatPacketStats(commandBuffer, sizeof(commandBuffer));
+        replyText = commandBuffer;
     } else if (isCommand && (strcmp(trimmed, "power") == 0 || strcmp(trimmed, "battery") == 0)) {
-        // Create detailed power status report
-        char powerBuffer[400];
-        formatPowerStats(powerBuffer, sizeof(powerBuffer));
-        replyText = powerBuffer;
+        formatPowerStats(commandBuffer, sizeof(commandBuffer));
+        replyText = commandBuffer;
     } else if (isCommand && (strcmp(trimmed, "radio") == 0 || strcmp(trimmed, "rf") == 0)) {
-        // Create detailed radio configuration report
-        char radioBuffer[400];
-        formatRadioStats(radioBuffer, sizeof(radioBuffer));
-        replyText = radioBuffer;
+        formatRadioStats(commandBuffer, sizeof(commandBuffer));
+        replyText = commandBuffer;
     } else if (isCommand && (strcmp(trimmed, "status") == 0 || strcmp(trimmed, "info") == 0)) {
-        // Create detailed device status report
-        char statusBuffer[400];
-        formatStatusInfo(statusBuffer, sizeof(statusBuffer));
-        replyText = statusBuffer;
+        formatStatusInfo(commandBuffer, sizeof(commandBuffer));
+        replyText = commandBuffer;
     } else if (isCommand && (strcmp(trimmed, "nodes") == 0 || strcmp(trimmed, "network") == 0)) {
-        // Create detailed nodes information report
-        char nodesBuffer[400];
-        formatNodesInfo(nodesBuffer, sizeof(nodesBuffer));
-        replyText = nodesBuffer;
+        formatNodesInfo(commandBuffer, sizeof(commandBuffer));
+        replyText = commandBuffer;
     } else if (isCommand && (strcmp(trimmed, "debug") == 0 || strcmp(trimmed, "dbg") == 0)) {
-        // Create debug information report (memory structures)
-        char debugBuffer[400];
-        formatDebugInfo(debugBuffer, sizeof(debugBuffer));
-        replyText = debugBuffer;
+        formatDebugInfo(commandBuffer, sizeof(commandBuffer));
+        replyText = commandBuffer;
     } else if (isCommand && (strcmp(trimmed, "mon start") == 0 || strcmp(trimmed, "monstart") == 0)) {
         // Start interactive setup for monitoring interval
         waitingMonStartNodeId = original.from;
@@ -575,7 +564,7 @@ void TextMessageModule::formatPowerStats(char* buffer, size_t bufferSize)
 void TextMessageModule::formatRadioStats(char* buffer, size_t bufferSize)
 {
     // Safety check for long-term operation
-    if (!buffer || bufferSize < 400) {
+    if (!buffer || bufferSize < 300) {
         LOG_ERROR("Invalid buffer for radio stats formatting");
         return;
     }
@@ -725,7 +714,7 @@ void TextMessageModule::formatNodesInfo(char* buffer, size_t bufferSize)
 void TextMessageModule::formatDebugInfo(char* buffer, size_t bufferSize)
 {
     // Safety check for long-term operation
-    if (!buffer || bufferSize < 400) {
+    if (!buffer || bufferSize < 300) {
         LOG_ERROR("Invalid buffer for debug info formatting");
         return;
     }
