@@ -41,6 +41,9 @@
 #endif
 #include "modules/RoutingModule.h"
 #include "modules/TextMessageModule.h"
+#if !MESHTASTIC_EXCLUDE_DEVICESTATS
+#include "modules/DeviceStatsModule.h"
+#endif
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
 #include "modules/TraceRouteModule.h"
 #endif
@@ -120,6 +123,10 @@ void setupModules()
 #endif
 #if !MESHTASTIC_EXCLUDE_TEXTMESSAGE
         textMessageModule = new TextMessageModule();
+#endif
+#if !MESHTASTIC_EXCLUDE_DEVICESTATS
+        // Custom device statistics and monitoring module
+        deviceStatsModule = new DeviceStatsModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
         traceRouteModule = new TraceRouteModule();

@@ -157,21 +157,12 @@ bool HealthTelemetryModule::handleReceivedProtobuf(const meshtastic_MeshPacket &
     return false; // Let others look at this message also if they want
 }
 
-/*
- * Health sensor telemetry using native protobuf structure
- * 
- * This function uses meshtastic_HealthMetrics protobuf in its intended way
- * for actual health sensor data (heart rate, body temperature, SpO2, etc.)
- * from MAX30102 pulse oximeter and MLX90614 IR temperature sensors.
- * 
- * Uses existing protobuf structure without custom definitions for memory efficiency.
- */
 bool HealthTelemetryModule::getHealthTelemetry(meshtastic_Telemetry *m)
 {
     bool valid = true;
     bool hasSensor = false;
     m->time = getTime();
-    m->which_variant = meshtastic_Telemetry_health_metrics_tag;  // Use health variant for actual health sensor data
+    m->which_variant = meshtastic_Telemetry_health_metrics_tag;
     m->variant.health_metrics = meshtastic_HealthMetrics_init_zero;
 
     if (max30102Sensor.hasSensor()) {

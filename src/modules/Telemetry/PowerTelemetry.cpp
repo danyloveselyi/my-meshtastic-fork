@@ -168,20 +168,11 @@ bool PowerTelemetryModule::handleReceivedProtobuf(const meshtastic_MeshPacket &m
     return false; // Let others look at this message also if they want
 }
 
-/*
- * Power sensor telemetry using native protobuf structure
- * 
- * This function uses meshtastic_PowerMetrics protobuf in its intended way
- * for actual power sensor data (voltage, current, battery level, etc.)
- * from INA219/226/260/3221 sensors and MAX17048 fuel gauge.
- * 
- * Uses existing protobuf structure without custom definitions for memory efficiency.
- */
 bool PowerTelemetryModule::getPowerTelemetry(meshtastic_Telemetry *m)
 {
     bool valid = false;
     m->time = getTime();
-    m->which_variant = meshtastic_Telemetry_power_metrics_tag;  // Use power variant for actual power sensor data
+    m->which_variant = meshtastic_Telemetry_power_metrics_tag;
 
     m->variant.power_metrics = meshtastic_PowerMetrics_init_zero;
 #if HAS_TELEMETRY

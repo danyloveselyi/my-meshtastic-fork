@@ -52,13 +52,6 @@ BMP280Sensor bmp280Sensor;
 NullSensor bme280Sensor;
 #endif
 
-#if __has_include(<Adafruit_LTR390.h>)
-#include "Sensor/LTR390UVSensor.h"
-LTR390UVSensor ltr390uvSensor;
-#else
-NullSensor ltr390uvSensor;
-#endif
-
 #if __has_include(<bsec2.h>)
 #include "Sensor/BME680Sensor.h"
 BME680Sensor bme680Sensor;
@@ -238,8 +231,6 @@ int32_t EnvironmentTelemetryModule::runOnce()
 #endif
             if (bme280Sensor.hasSensor())
                 result = bme280Sensor.runOnce();
-            if (ltr390uvSensor.hasSensor())
-                result = ltr390uvSensor.runOnce();
             if (bmp3xxSensor.hasSensor())
                 result = bmp3xxSensor.runOnce();
             if (bme680Sensor.hasSensor())
@@ -479,22 +470,12 @@ bool EnvironmentTelemetryModule::handleReceivedProtobuf(const meshtastic_MeshPac
     return false; // Let others look at this message also if they want
 }
 
-/*
- * Standard environment sensor telemetry using native protobuf structure
- * 
- * This function uses meshtastic_EnvironmentMetrics protobuf in its intended way
- * for actual environmental sensor data (temperature, humidity, pressure, etc.)
- * 
- * NOTE: The same protobuf structure is reused in DeviceTelemetry module for 
- * memory statistics to avoid creating custom protobuf definitions - see
- * DeviceTelemetryModule::getMemoryStatsAsEnvironmentTelemetry() for field mapping.
- */
 bool EnvironmentTelemetryModule::getEnvironmentTelemetry(meshtastic_Telemetry *m)
 {
     bool valid = true;
     bool hasSensor = false;
     m->time = getTime();
-    m->which_variant = meshtastic_Telemetry_environment_metrics_tag;  // Use environment variant for actual sensor data
+    m->which_variant = meshtastic_Telemetry_environment_metrics_tag;
     m->variant.environment_metrics = meshtastic_EnvironmentMetrics_init_zero;
 
 #ifdef SENSECAP_INDICATOR
@@ -541,10 +522,6 @@ bool EnvironmentTelemetryModule::getEnvironmentTelemetry(meshtastic_Telemetry *m
 #endif
     if (bme280Sensor.hasSensor()) {
         valid = valid && bme280Sensor.getMetrics(m);
-        hasSensor = true;
-    }
-    if (ltr390uvSensor.hasSensor()) {
-        valid = valid && ltr390uvSensor.getMetrics(m);
         hasSensor = true;
     }
     if (bmp3xxSensor.hasSensor()) {
@@ -772,11 +749,6 @@ AdminMessageHandleResult EnvironmentTelemetryModule::handleAdminMessageForModule
     }
     if (bme280Sensor.hasSensor()) {
         result = bme280Sensor.handleAdminMessage(mp, request, response);
-        if (result != AdminMessageHandleResult::NOT_HANDLED)
-            return result;
-    }
-    if (ltr390uvSensor.hasSensor()) {
-        result = ltr390uvSensor.handleAdminMessage(mp, request, response);
         if (result != AdminMessageHandleResult::NOT_HANDLED)
             return result;
     }

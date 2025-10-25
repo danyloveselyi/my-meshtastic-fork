@@ -14,16 +14,6 @@
 #include <OLEDDisplay.h>
 #include <OLEDDisplayUi.h>
 
-/*
- * Environment sensor telemetry module using native protobuf structure
- * 
- * This module handles actual environmental sensors (temperature, humidity, pressure, etc.)
- * using meshtastic_EnvironmentMetrics protobuf in its intended way.
- * 
- * MEMORY OPTIMIZATION NOTE: The same meshtastic_EnvironmentMetrics protobuf structure 
- * is reused by DeviceTelemetryModule for memory/node statistics to avoid creating 
- * custom protobuf definitions and save Flash memory.
- */
 class EnvironmentTelemetryModule : private concurrency::OSThread, public ProtobufModule<meshtastic_Telemetry>
 {
     CallbackObserver<EnvironmentTelemetryModule, const meshtastic::Status *> nodeStatusObserver =

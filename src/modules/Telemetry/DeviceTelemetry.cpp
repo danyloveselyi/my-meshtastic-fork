@@ -1,22 +1,5 @@
-/*
- * TELEMETRY MEMORY OPTIMIZATION STRATEGY
- * 
- * This file implements memory-efficient telemetry using existing protobuf structures
- * instead of creating custom protobuf definitions. This saves significant Flash memory
- * by reusing generated protobuf code.
- * 
- * PROTOBUF REUSE EXAMPLES:
- * 1. meshtastic_EnvironmentMetrics → Memory/node statistics (DeviceTelemetry)
- * 2. meshtastic_PowerMetrics → Power sensor data (PowerTelemetry) 
- * 3. meshtastic_HealthMetrics → Health sensor data (HealthTelemetry)
- * 4. meshtastic_LocalStats → Local mesh statistics (DeviceTelemetry)
- * 
- * This approach maintains protocol compatibility while optimizing memory usage
- * for resource-constrained devices like nRF52840.
- */
-
 #include "DeviceTelemetry.h"
-#include "../mesh/generated/meshtastic/telemetry.pb.h"  // Existing protobuf definitions - no custom protobufs needed
+#include "../mesh/generated/meshtastic/telemetry.pb.h"
 #include "Default.h"
 #include "MeshService.h"
 #include "NodeDB.h"
@@ -26,7 +9,6 @@
 #include "Router.h"
 #include "configuration.h"
 #include "main.h"
-#include "mesh/mesh-pb-constants.h"
 #include "memGet.h"
 #include <OLEDDisplay.h>
 #include <OLEDDisplayUi.h>
@@ -128,76 +110,6 @@ meshtastic_Telemetry DeviceTelemetryModule::getDeviceTelemetry()
     return t;
 }
 
-/*
- * Memory-efficient telemetry implementation using existing protobuf structures
- * 
- * OPTIMIZATION STRATEGY: Instead of creating custom protobuf messages for memory stats,
- * this function reuses the existing meshtastic_EnvironmentMetrics protobuf structure.
- * This saves Flash memory by avoiding additional protobuf definitions and generated code.
- * 
- * FIELD MAPPING (Environment → Memory Stats):
- * - gas_resistance     → Flash total (KB) 
- * - relative_humidity  → Flash free (KB)
- * - iaq               → Heap total (KB)
- * - lux               → Heap free (KB)  
- * - white_lux         → Online mesh nodes count
- * - barometric_pressure → Total mesh nodes count
- *
- * This approach maintains client compatibility while providing memory monitoring
- * functionality without additional protobuf overhead.
- */
-meshtastic_Telemetry DeviceTelemetryModule::getMemoryStatsAsEnvironmentTelemetry()
-{
-    // Reuse existing meshtastic_Telemetry protobuf - no custom protobuf needed for memory optimization
-    meshtastic_Telemetry t = meshtastic_Telemetry_init_zero;
-    t.which_variant = meshtastic_Telemetry_environment_metrics_tag;  // Use environment variant for memory data
-    t.time = getTime();
-    t.variant.environment_metrics = meshtastic_EnvironmentMetrics_init_zero;
-
-    // FLASH MEMORY STATISTICS - repurpose gas/humidity fields for flash info
-    // gas_resistance field → Flash total size in KB
-    t.variant.environment_metrics.has_gas_resistance = true;
-    t.variant.environment_metrics.gas_resistance = memGet.getFlashTotal() / 1024.0f; // Flash total in KB
-
-    // relative_humidity field → Flash free space in KB  
-    t.variant.environment_metrics.has_relative_humidity = true;
-    t.variant.environment_metrics.relative_humidity = memGet.getFlashFree() / 1024.0f; // Flash free in KB
-
-    // HEAP MEMORY STATISTICS - repurpose air quality fields for heap info
-    // iaq field → Heap total size in KB (as integer for precision)
-    t.variant.environment_metrics.has_iaq = true;
-    t.variant.environment_metrics.iaq = (uint32_t)(memGet.getHeapSize() / 1024); // Heap total in KB (as integer)
-
-    // lux field → Heap free space in KB
-    t.variant.environment_metrics.has_lux = true;
-    t.variant.environment_metrics.lux = memGet.getFreeHeap() / 1024.0f; // Heap free in KB
-
-    // MESH NETWORK STATISTICS - repurpose light sensor fields for node counts
-    // white_lux field → Active/online mesh nodes count
-    t.variant.environment_metrics.has_white_lux = true;
-    t.variant.environment_metrics.white_lux = nodeDB->getNumOnlineMeshNodes(); // Number of online mesh nodes
-
-    // barometric_pressure field → Total mesh nodes in database (including offline)
-    t.variant.environment_metrics.has_barometric_pressure = true;
-    t.variant.environment_metrics.barometric_pressure = nodeDB->getNumMeshNodes(); // Total nodes in database
-
-    // current field → Maximum nodes limit configured for this device
-    t.variant.environment_metrics.has_current = true;
-    t.variant.environment_metrics.current = MAX_NUM_NODES; // Maximum nodes configured
-
-    // Debug log showing field mapping: Environment protobuf fields → Actual memory/node data
-    LOG_INFO("MemoryStats as Environment: Flash(gas_resistance/relative_humidity)=%.1f/%.1fKB, Heap(iaq/lux)=%u/%.1fKB, Nodes(white_lux/barometric_pressure/current)=%.0f/%.1f/%.1f",
-             t.variant.environment_metrics.gas_resistance, t.variant.environment_metrics.relative_humidity,
-             t.variant.environment_metrics.iaq, t.variant.environment_metrics.lux,
-             t.variant.environment_metrics.white_lux, t.variant.environment_metrics.barometric_pressure, t.variant.environment_metrics.current);
-    
-    // Raw memory values for debugging - actual system calls before field mapping
-    LOG_INFO("Raw memory values: FlashTotal=%u, FlashUsed=%u, FlashFree=%u, HeapTotal=%u, HeapFree=%u",
-             memGet.getFlashTotal(), memGet.getFlashUsed(), memGet.getFlashFree(),
-             memGet.getHeapSize(), memGet.getFreeHeap());
-    return t;
-}
-
 meshtastic_Telemetry DeviceTelemetryModule::getLocalStatsTelemetry()
 {
     meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_zero;
@@ -254,7 +166,6 @@ void DeviceTelemetryModule::sendLocalStatsToPhone()
 
 bool DeviceTelemetryModule::sendTelemetry(NodeNum dest, bool phoneOnly)
 {
-    // Send normal device telemetry
     meshtastic_Telemetry telemetry = getDeviceTelemetry();
     LOG_INFO("Send: air_util_tx=%f, channel_utilization=%f, battery_level=%i, voltage=%f, uptime=%i",
              telemetry.variant.device_metrics.air_util_tx, telemetry.variant.device_metrics.channel_utilization,
@@ -274,22 +185,5 @@ bool DeviceTelemetryModule::sendTelemetry(NodeNum dest, bool phoneOnly)
         LOG_INFO("Send packet to mesh");
         service->sendToMesh(p, RX_SRC_LOCAL, true);
     }
-
-    // Also send memory stats as environment metrics for client compatibility
-    meshtastic_Telemetry memoryTelemetry = getMemoryStatsAsEnvironmentTelemetry();
-    meshtastic_MeshPacket *memoryPacket = allocDataProtobuf(memoryTelemetry);
-    memoryPacket->to = dest;
-    memoryPacket->decoded.want_response = false;
-    memoryPacket->priority = meshtastic_MeshPacket_Priority_BACKGROUND;
-
-    nodeDB->updateTelemetry(nodeDB->getNodeNum(), memoryTelemetry, RX_SRC_LOCAL);
-    if (phoneOnly) {
-        LOG_INFO("Send memory stats packet to phone");
-        service->sendToPhone(memoryPacket);
-    } else {
-        LOG_INFO("Send memory stats packet to mesh");
-        service->sendToMesh(memoryPacket, RX_SRC_LOCAL, true);
-    }
-
     return true;
 }

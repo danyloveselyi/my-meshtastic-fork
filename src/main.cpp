@@ -34,6 +34,9 @@
 #include "meshUtils.h"
 #include "modules/Modules.h"
 #include "modules/TextMessageModule.h"
+#if !MESHTASTIC_EXCLUDE_DEVICESTATS
+#include "modules/DeviceStatsModule.h"
+#endif
 #include "shutdown.h"
 #include "sleep.h"
 #include "target_specific.h"
@@ -1411,10 +1414,12 @@ void loop()
 
     service->loop();
 
-    // Handle periodic memory monitoring
-    if (textMessageModule) {
-        textMessageModule->doPeriodicWork();
+#if !MESHTASTIC_EXCLUDE_DEVICESTATS
+    // Handle periodic device statistics monitoring
+    if (deviceStatsModule) {
+        deviceStatsModule->doPeriodicWork();
     }
+#endif
 
     long delayMsec = mainController.runOrDelay();
 
