@@ -25,6 +25,7 @@ void trim(char* s) {
 #include "airtime.h"
 #include "modules/Telemetry/DeviceTelemetry.h"
 #include "PowerStatus.h"
+#include "mesh/PacketHistory.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -142,6 +143,11 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
         char nodesBuffer[400];
         formatNodesInfo(nodesBuffer, sizeof(nodesBuffer));
         replyText = nodesBuffer;
+    } else if (isCommand && (strcmp(trimmed, "debug") == 0 || strcmp(trimmed, "dbg") == 0)) {
+        // Create debug information report (memory structures)
+        char debugBuffer[400];
+        formatDebugInfo(debugBuffer, sizeof(debugBuffer));
+        replyText = debugBuffer;
     } else if (isCommand && (strcmp(trimmed, "mon start") == 0 || strcmp(trimmed, "monstart") == 0)) {
         // Start interactive setup for monitoring interval
         waitingMonStartNodeId = original.from;
@@ -171,11 +177,12 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
         // Show available commands with safety note
         snprintf(replyBuffer, sizeof(replyBuffer), 
                  "📋 Commands:\n"
-                 "/mem /packets /power /radio\n"
-                 "/status /nodes /maxnodes\n"
+                 "/mem /packets /power\n"
+                 "/radio /status /nodes\n"
+                 "/debug /maxnodes\n"
                  "/setmaxnodes /monstart /monstop\n"
-                 "Note: Max nodes default=%u", 
-                 DEFAULT_MAX_NODES);
+                 "Nodes=%u", 
+                 dynamic_max_nodes);
         replyText = replyBuffer;
     } else if (waitingSetMaxNodesNodeId == original.from) {
         // User is setting max nodes value with PIN
@@ -416,33 +423,25 @@ void TextMessageModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
         return;
     }
 
-    // Get memory and node statistics with safety checks
+    // Get memory statistics with safety checks
     float flashTotal = memGet.getFlashTotal() / 1024.0f; // KB
     float flashFree = memGet.getFlashFree() / 1024.0f;   // KB
     uint32_t heapTotal = memGet.getHeapSize() / 1024;    // KB
     float heapFree = memGet.getFreeHeap() / 1024.0f;     // KB
-    
-    // Protect against null nodeDB (can happen during shutdown)
-    uint32_t onlineNodes = nodeDB ? nodeDB->getNumOnlineMeshNodes() : 0;
-    uint32_t totalNodes = nodeDB ? nodeDB->getNumMeshNodes() : 0;
-    uint32_t maxNodes = dynamic_max_nodes;  // Use dynamic value
-    uint32_t freeSlots = (maxNodes > totalNodes) ? (maxNodes - totalNodes) : 0;
 
     // Calculate used amounts with overflow protection
     float flashUsed = (flashTotal >= flashFree) ? (flashTotal - flashFree) : 0.0f;
     uint32_t heapUsed = (heapTotal >= (uint32_t)heapFree) ? (heapTotal - (uint32_t)heapFree) : 0;
 
-    // Format detailed memory report
+    // Format detailed memory report (optimized - removed duplicate node info)
     int result = snprintf(buffer, bufferSize,
         "📊 MEMORY REPORT\n"
         "Flash: %.0f/%.0fKB (%.0fKB free)\n"
         "Heap: %u/%uKB (%.0fKB free)\n"
-        "Nodes: %u/%u (free:%u)\n"
         "Queues: Phone=%u Status=%u Notif=%u\n"
         "Pool: ~22 packets (~11KB)",
         flashTotal, flashUsed, flashFree,
         heapTotal, heapUsed, heapFree,
-        maxNodes, totalNodes, freeSlots,
         MAX_RX_TOPHONE, MAX_RX_TOPHONE, MAX_RX_TOPHONE/2);
         
     // Debug log to verify the message is being formatted correctly
@@ -576,7 +575,7 @@ void TextMessageModule::formatPowerStats(char* buffer, size_t bufferSize)
 void TextMessageModule::formatRadioStats(char* buffer, size_t bufferSize)
 {
     // Safety check for long-term operation
-    if (!buffer || bufferSize < 300) {
+    if (!buffer || bufferSize < 400) {
         LOG_ERROR("Invalid buffer for radio stats formatting");
         return;
     }
@@ -597,19 +596,39 @@ void TextMessageModule::formatRadioStats(char* buffer, size_t bufferSize)
         power = config.lora.tx_power;
     }
     
-    // Format radio statistics report
+    // Get packet statistics for average rates
+    uint32_t txGood = 0, rxGood = 0, rxBad = 0;
+    if (RadioLibInterface::instance) {
+        txGood = RadioLibInterface::instance->txGood;
+        rxGood = RadioLibInterface::instance->rxGood;
+        rxBad = RadioLibInterface::instance->rxBad;
+    }
+    
+    // Calculate average packet rates
+    uint32_t uptime = millis() / 1000;
+    float txAvgMin = (uptime > 0) ? (txGood * 60.0f / uptime) : 0.0f;
+    float txAvgHour = (uptime > 0) ? (txGood * 3600.0f / uptime) : 0.0f;
+    float rxAvgMin = (uptime > 0) ? ((rxGood + rxBad) * 60.0f / uptime) : 0.0f;
+    float rxAvgHour = (uptime > 0) ? ((rxGood + rxBad) * 3600.0f / uptime) : 0.0f;
+    
+    // Get online nodes count
+    uint32_t onlineNodes = nodeDB ? nodeDB->getNumOnlineMeshNodes() : 0;
+    
+    // Format radio statistics report with packet averages and online nodes
     int result = snprintf(buffer, bufferSize,
         "📡 RADIO CONFIG\n"
-        "Freq: %.3f MHz\n"
-        "Channel: %u\n"
+        "Freq: %.3f MHz Ch: %u\n"
         "SF: %u BW: %.1f kHz\n"
-        "TX Power: %d dBm\n"
-        "Region: %s",
-        frequency,
-        channel,
+        "Power: %d dBm\n"
+        "Avg TX: %.1f/min %.1f/hr\n"
+        "Avg RX: %.1f/min %.1f/hr\n"
+        "Online nodes: %u",
+        frequency, channel,
         sf, bw,
         power,
-        config.lora.region);
+        txAvgMin, txAvgHour,
+        rxAvgMin, rxAvgHour,
+        onlineNodes);
                  
     // Ensure null termination for safety
     if (result >= (int)bufferSize) {
@@ -700,5 +719,54 @@ void TextMessageModule::formatNodesInfo(char* buffer, size_t bufferSize)
     if (result >= (int)bufferSize) {
         buffer[bufferSize - 1] = '\0';
         LOG_WARN("Nodes info message truncated");
+    }
+}
+
+void TextMessageModule::formatDebugInfo(char* buffer, size_t bufferSize)
+{
+    // Safety check for long-term operation
+    if (!buffer || bufferSize < 400) {
+        LOG_ERROR("Invalid buffer for debug info formatting");
+        return;
+    }
+
+    // Get heap for context
+    uint32_t freeHeap = memGet.getFreeHeap();
+    uint32_t totalHeap = memGet.getHeapSize();
+    uint32_t usedHeap = totalHeap - freeHeap;
+    uint32_t heapPercent = (totalHeap > 0) ? (usedHeap * 100 / totalHeap) : 0;
+    
+    // Calculate PacketHistory memory usage
+    // Each PacketRecord = ~16 bytes, reserves dynamic_max_nodes entries
+    uint32_t maxHistoryRecords = dynamic_max_nodes;
+    uint32_t historyBytes = maxHistoryRecords * 16;
+    
+    // Calculate NodeDB memory usage
+    // Each node = ~250 bytes
+    uint32_t nodeDbBytes = dynamic_max_nodes * 250;
+    
+    // Get queue sizes
+    uint32_t maxTxQueue = 16;      // MAX_TX_QUEUE
+    uint32_t maxFromRadio = 4;     // MAX_RX_FROMRADIO
+    uint32_t maxToPhone = MAX_RX_TOPHONE;  // 32
+    
+    // Format debug information report - optimized for diagnostics
+    int result = snprintf(buffer, bufferSize,
+        "🔧 DEBUG INFO\n"
+        "Heap: %u/%uKB (%u%%)\n"
+        "PacketHist: ~%uKB (%u recs)\n"
+        "NodeDB: ~%uKB (%u nodes)\n"
+        "Queues: TX=%u RX=%u ToPhone=%u\n"
+        "⚠️ PacketHist grows with traffic\n"
+        "⚠️ NodeDB grows with node count",
+        usedHeap/1024, totalHeap/1024, heapPercent,
+        historyBytes/1024, maxHistoryRecords,
+        nodeDbBytes/1024, dynamic_max_nodes,
+        maxTxQueue, maxFromRadio, maxToPhone);
+                 
+    // Ensure null termination for safety
+    if (result >= (int)bufferSize) {
+        buffer[bufferSize - 1] = '\0';
+        LOG_WARN("Debug info message truncated");
     }
 }

@@ -32,6 +32,7 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
       void formatRadioStats(char* buffer, size_t bufferSize);
       void formatStatusInfo(char* buffer, size_t bufferSize);
       void formatNodesInfo(char* buffer, size_t bufferSize);
+      void formatDebugInfo(char* buffer, size_t bufferSize);
 
       // Monitoring variables
       uint32_t monitoringNodeId = 0;  // Node ID that requested monitoring (0 = disabled)
