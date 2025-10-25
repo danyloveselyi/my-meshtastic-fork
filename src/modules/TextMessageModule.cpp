@@ -24,6 +24,7 @@ void trim(char* s) {
 #include "RadioLibInterface.h"
 #include "airtime.h"
 #include "modules/Telemetry/DeviceTelemetry.h"
+#include "PowerStatus.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -121,6 +122,26 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
         char packetBuffer[400];
         formatPacketStats(packetBuffer, sizeof(packetBuffer));
         replyText = packetBuffer;
+    } else if (isCommand && (strcmp(trimmed, "power") == 0 || strcmp(trimmed, "battery") == 0)) {
+        // Create detailed power status report
+        char powerBuffer[400];
+        formatPowerStats(powerBuffer, sizeof(powerBuffer));
+        replyText = powerBuffer;
+    } else if (isCommand && (strcmp(trimmed, "radio") == 0 || strcmp(trimmed, "rf") == 0)) {
+        // Create detailed radio configuration report
+        char radioBuffer[400];
+        formatRadioStats(radioBuffer, sizeof(radioBuffer));
+        replyText = radioBuffer;
+    } else if (isCommand && (strcmp(trimmed, "status") == 0 || strcmp(trimmed, "info") == 0)) {
+        // Create detailed device status report
+        char statusBuffer[400];
+        formatStatusInfo(statusBuffer, sizeof(statusBuffer));
+        replyText = statusBuffer;
+    } else if (isCommand && (strcmp(trimmed, "nodes") == 0 || strcmp(trimmed, "network") == 0)) {
+        // Create detailed nodes information report
+        char nodesBuffer[400];
+        formatNodesInfo(nodesBuffer, sizeof(nodesBuffer));
+        replyText = nodesBuffer;
     } else if (isCommand && (strcmp(trimmed, "mon start") == 0 || strcmp(trimmed, "monstart") == 0)) {
         // Start interactive setup for monitoring interval
         waitingMonStartNodeId = original.from;
@@ -149,7 +170,11 @@ void TextMessageModule::sendAutoReply(const meshtastic_MeshPacket &original)
     } else if (isCommand && (strcmp(trimmed, "help") == 0 || strcmp(trimmed, "?") == 0 || strcmp(trimmed, "commands") == 0)) {
         // Show available commands with safety note
         snprintf(replyBuffer, sizeof(replyBuffer), 
-                 "Commands: /mem /packets /monstart /monstop /maxnodes /setmaxnodes /help. Note: setmaxnodes can only increase (safe default: %u)", 
+                 "📋 Commands:\n"
+                 "/mem /packets /power /radio\n"
+                 "/status /nodes /maxnodes\n"
+                 "/setmaxnodes /monstart /monstop\n"
+                 "Note: Max nodes default=%u", 
                  DEFAULT_MAX_NODES);
         replyText = replyBuffer;
     } else if (waitingSetMaxNodesNodeId == original.from) {
@@ -497,5 +522,183 @@ void TextMessageModule::formatPacketStats(char* buffer, size_t bufferSize)
     if (result >= (int)bufferSize) {
         buffer[bufferSize - 1] = '\0';
         LOG_WARN("Packet stats message truncated");
+    }
+}
+
+void TextMessageModule::formatPowerStats(char* buffer, size_t bufferSize)
+{
+    // Safety check for long-term operation
+    if (!buffer || bufferSize < 300) {
+        LOG_ERROR("Invalid buffer for power stats formatting");
+        return;
+    }
+
+    // Get power status information
+    uint8_t batteryPercent = 0;
+    uint16_t batteryVoltageMv = 0;
+    const char* powerSource = "Unknown";
+    const char* chargingStatus = "";
+    
+    if (powerStatus) {
+        batteryPercent = powerStatus->getBatteryChargePercent();
+        batteryVoltageMv = powerStatus->getBatteryVoltageMv();
+        
+        // Determine power source and charging status
+        if (powerStatus->getHasUSB()) {
+            powerSource = "USB";
+            if (powerStatus->getHasBattery() && powerStatus->getIsCharging()) {
+                chargingStatus = " (Charging)";
+            } else if (powerStatus->getHasBattery()) {
+                chargingStatus = " (Full)";
+            }
+        } else if (powerStatus->getHasBattery()) {
+            powerSource = "Battery";
+        }
+    }
+    
+    // Format power statistics report
+    int result = snprintf(buffer, bufferSize,
+        "🔋 POWER STATUS\n"
+        "Source: %s%s\n"
+        "Battery: %u%% (%.2fV)\n"
+        "Voltage: %u mV",
+        powerSource, chargingStatus,
+        batteryPercent, batteryVoltageMv / 1000.0f,
+        batteryVoltageMv);
+                 
+    // Ensure null termination for safety
+    if (result >= (int)bufferSize) {
+        buffer[bufferSize - 1] = '\0';
+        LOG_WARN("Power stats message truncated");
+    }
+}
+
+void TextMessageModule::formatRadioStats(char* buffer, size_t bufferSize)
+{
+    // Safety check for long-term operation
+    if (!buffer || bufferSize < 300) {
+        LOG_ERROR("Invalid buffer for radio stats formatting");
+        return;
+    }
+
+    // Get radio configuration
+    float frequency = 0.0f;
+    uint8_t channel = 0;
+    uint8_t sf = 0;
+    float bw = 0.0f;
+    int8_t power = 0;
+    
+    if (RadioLibInterface::instance) {
+        frequency = RadioLibInterface::instance->getFreq();
+        channel = RadioLibInterface::instance->getChannelNum();
+        // Access radio configuration from config
+        sf = config.lora.spread_factor;
+        bw = config.lora.bandwidth;
+        power = config.lora.tx_power;
+    }
+    
+    // Format radio statistics report
+    int result = snprintf(buffer, bufferSize,
+        "📡 RADIO CONFIG\n"
+        "Freq: %.3f MHz\n"
+        "Channel: %u\n"
+        "SF: %u BW: %.1f kHz\n"
+        "TX Power: %d dBm\n"
+        "Region: %s",
+        frequency,
+        channel,
+        sf, bw,
+        power,
+        config.lora.region);
+                 
+    // Ensure null termination for safety
+    if (result >= (int)bufferSize) {
+        buffer[bufferSize - 1] = '\0';
+        LOG_WARN("Radio stats message truncated");
+    }
+}
+
+void TextMessageModule::formatStatusInfo(char* buffer, size_t bufferSize)
+{
+    // Safety check for long-term operation
+    if (!buffer || bufferSize < 300) {
+        LOG_ERROR("Invalid buffer for status info formatting");
+        return;
+    }
+
+    // Get uptime
+    uint32_t uptimeMs = millis();
+    uint32_t uptime = uptimeMs / 1000;
+    uint32_t uptimeDays = uptime / 86400;
+    uint32_t uptimeHours = (uptime % 86400) / 3600;
+    uint32_t uptimeMinutes = (uptime % 3600) / 60;
+    
+    // Get reboot counter
+    uint32_t rebootCount = myNodeInfo.reboot_count;
+    
+    // Get node info
+    const char* nodeName = owner.long_name;
+    uint32_t nodeId = nodeDB->getNodeNum();
+    
+    // Format status information report
+    int result = snprintf(buffer, bufferSize,
+        "ℹ️ DEVICE STATUS\n"
+        "Name: %s\n"
+        "Node ID: !%08x\n"
+        "Uptime: %ud %uh %um\n"
+        "Reboots: %u\n"
+        "Role: %s",
+        nodeName,
+        nodeId,
+        uptimeDays, uptimeHours, uptimeMinutes,
+        rebootCount,
+        config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER ? "Router" :
+        config.device.role == meshtastic_Config_DeviceConfig_Role_REPEATER ? "Repeater" :
+        config.device.role == meshtastic_Config_DeviceConfig_Role_CLIENT ? "Client" : "Unknown");
+                 
+    // Ensure null termination for safety
+    if (result >= (int)bufferSize) {
+        buffer[bufferSize - 1] = '\0';
+        LOG_WARN("Status info message truncated");
+    }
+}
+
+void TextMessageModule::formatNodesInfo(char* buffer, size_t bufferSize)
+{
+    // Safety check for long-term operation
+    if (!buffer || bufferSize < 300) {
+        LOG_ERROR("Invalid buffer for nodes info formatting");
+        return;
+    }
+
+    // Get node statistics with safety checks
+    uint32_t onlineNodes = nodeDB ? nodeDB->getNumOnlineMeshNodes() : 0;
+    uint32_t totalNodes = nodeDB ? nodeDB->getNumMeshNodes() : 0;
+    uint32_t maxNodes = dynamic_max_nodes;
+    uint32_t offlineNodes = (totalNodes > onlineNodes) ? (totalNodes - onlineNodes) : 0;
+    uint32_t freeSlots = (maxNodes > totalNodes) ? (maxNodes - totalNodes) : 0;
+    
+    // Calculate percentages
+    float usagePercent = (maxNodes > 0) ? (totalNodes * 100.0f / maxNodes) : 0.0f;
+    float onlinePercent = (totalNodes > 0) ? (onlineNodes * 100.0f / totalNodes) : 0.0f;
+    
+    // Format nodes information report
+    int result = snprintf(buffer, bufferSize,
+        "🌐 NETWORK NODES\n"
+        "Online: %u (%.0f%%)\n"
+        "Offline: %u\n"
+        "Total: %u / %u (%.0f%%)\n"
+        "Free slots: %u\n"
+        "Default max: %u",
+        onlineNodes, onlinePercent,
+        offlineNodes,
+        totalNodes, maxNodes, usagePercent,
+        freeSlots,
+        DEFAULT_MAX_NODES);
+                 
+    // Ensure null termination for safety
+    if (result >= (int)bufferSize) {
+        buffer[bufferSize - 1] = '\0';
+        LOG_WARN("Nodes info message truncated");
     }
 }
