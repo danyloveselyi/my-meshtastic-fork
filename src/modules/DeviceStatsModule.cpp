@@ -177,7 +177,7 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
     } else if (isCommand && (strcmp(trimmed, "help") == 0 || strcmp(trimmed, "?") == 0 || strcmp(trimmed, "commands") == 0)) {
         // Show available commands with safety note
         snprintf(replyBuffer, sizeof(replyBuffer), 
-                 "📋 Commands:\n"
+                 "📋 COMMANDS\n"
                  "/mem /packets /power\n"
                  "/radio /status /nodes\n"
                  "/debug /maxnodes\n"
@@ -434,21 +434,28 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     float flashFree = memGet.getFlashFree() / 1024.0f;   // KB
     uint32_t heapTotal = memGet.getHeapSize() / 1024;    // KB
     float heapFree = memGet.getFreeHeap() / 1024.0f;     // KB
+    
+    // Get node statistics
+    uint32_t totalNodes = nodeDB ? nodeDB->getNumMeshNodes() : 0;
+    uint32_t maxNodes = dynamic_max_nodes;
 
     // Calculate used amounts with overflow protection
     float flashUsed = (flashTotal >= flashFree) ? (flashTotal - flashFree) : 0.0f;
     uint32_t heapUsed = (heapTotal >= (uint32_t)heapFree) ? (heapTotal - (uint32_t)heapFree) : 0;
+    uint32_t freeSlots = (maxNodes > totalNodes) ? (maxNodes - totalNodes) : 0;
 
     // Format detailed memory report (optimized - removed duplicate node info)
     int result = snprintf(buffer, bufferSize,
-        "📊 MEMORY REPORT\n"
+        "📊 MEMORY\n"
         "Flash: %.0f/%.0fKB (%.0fKB free)\n"
         "Heap: %u/%uKB (%.0fKB free)\n"
-        "Queues: Phone=%u Status=%u Notif=%u\n"
-        "Pool: ~22 packets (~11KB)",
+        "Nodes: %u/%u (%u free)\n"
+        "Queues: Phone=%u Status=%u\n"
+        "Pool: ~22 pkts (~11KB)",
         flashTotal, flashUsed, flashFree,
         heapTotal, heapUsed, heapFree,
-        MAX_RX_TOPHONE, MAX_RX_TOPHONE, MAX_RX_TOPHONE/2);
+        totalNodes, maxNodes, freeSlots,
+        MAX_RX_TOPHONE, MAX_RX_TOPHONE);
         
     // Debug log to verify the message is being formatted correctly
     LOG_INFO("Formatted detailed memory stats: %s", buffer);
@@ -514,24 +521,21 @@ void DeviceStatsModule::formatPacketStats(char* buffer, size_t bufferSize)
 
     // Format packet statistics report with clear sections
     int result = snprintf(buffer, bufferSize,
-        "📦 PACKET STATS\n"
-        "📤 TX: %u pkts\n"
-        "  Rate: %.1f/min, %.0f/hr\n"
-        "📥 RX: %u/%u (%.0f%% OK)\n"
-        "  Rate: %.1f/min, %.0f/hr\n"
-        "🔁 Relay: %u/%u (%.0f%% OK)\n"
-        "♻️ Dupes filtered: %u\n"
-        "📡 Channel: %.1f%% busy\n"
-        "📻 TX airtime: %.1f%%\n"
-        "⏰ Uptime: %uh %um",
+        "📦 PACKETS\n"
+        "TX: %u (%.1f/m %.0f/h)\n"
+        "RX: %u/%u (%.0f%%)\n"
+        "  Rate: %.1f/m %.0f/h\n"
+        "Relay: %u/%u (%.0f%%)\n"
+        "Dupes: %u\n"
+        "Ch: %.1f%% TX air: %.1f%%\n"
+        "Up: %uh %um",
         txGood,
         txRateMin, txRateHour,
         rxGood, rxTotal, rxSuccessRate,
         rxRateMin, rxRateHour,
         txRelay, relayTotal, relaySuccessRate,
         rxDupe,
-        channelUtil,
-        airUtilTx,
+        channelUtil, airUtilTx,
         uptimeHours, uptimeMinutes);
                  
     // Ensure null termination for safety
@@ -574,7 +578,7 @@ void DeviceStatsModule::formatPowerStats(char* buffer, size_t bufferSize)
     
     // Format power statistics report
     int result = snprintf(buffer, bufferSize,
-        "🔋 POWER STATUS\n"
+        "🔋 POWER\n"
         "Source: %s%s\n"
         "Battery: %u%% (%.2fV)\n"
         "Voltage: %u mV",
@@ -600,17 +604,23 @@ void DeviceStatsModule::formatRadioStats(char* buffer, size_t bufferSize)
     // Get radio configuration
     float frequency = 0.0f;
     uint8_t channel = 0;
-    uint8_t sf = 0;
-    float bw = 0.0f;
-    int8_t power = 0;
+    uint8_t sf = 9;      // Default SF9
+    float bw = 125.0f;   // Default 125 kHz
+    int8_t power = 17;   // Default 17 dBm
     
     if (RadioLibInterface::instance) {
         frequency = RadioLibInterface::instance->getFreq();
         channel = RadioLibInterface::instance->getChannelNum();
-        // Access radio configuration from config
-        sf = config.lora.spread_factor;
-        bw = config.lora.bandwidth;
-        power = config.lora.tx_power;
+        // Try to get actual radio settings from config (fallback to defaults)
+        if (config.lora.spread_factor > 0) {
+            sf = config.lora.spread_factor;
+        }
+        if (config.lora.bandwidth > 0) {
+            bw = config.lora.bandwidth;
+        }
+        if (config.lora.tx_power != 0) {
+            power = config.lora.tx_power;
+        }
     }
     
     // Get packet statistics for average rates
@@ -633,13 +643,13 @@ void DeviceStatsModule::formatRadioStats(char* buffer, size_t bufferSize)
     
     // Format radio statistics report with packet averages and online nodes
     int result = snprintf(buffer, bufferSize,
-        "📡 RADIO CONFIG\n"
+        "📡 RADIO\n"
         "Freq: %.3f MHz Ch: %u\n"
         "SF: %u BW: %.1f kHz\n"
         "Power: %d dBm\n"
-        "Avg TX: %.1f/min %.1f/hr\n"
-        "Avg RX: %.1f/min %.1f/hr\n"
-        "Online nodes: %u",
+        "TX avg: %.1f/m %.1f/h\n"
+        "RX avg: %.1f/m %.1f/h\n"
+        "Online: %u nodes",
         frequency, channel,
         sf, bw,
         power,
@@ -678,10 +688,10 @@ void DeviceStatsModule::formatStatusInfo(char* buffer, size_t bufferSize)
     
     // Format status information report
     int result = snprintf(buffer, bufferSize,
-        "ℹ️ DEVICE STATUS\n"
+        "ℹ️ STATUS\n"
         "Name: %s\n"
-        "Node ID: !%08x\n"
-        "Uptime: %ud %uh %um\n"
+        "ID: !%08x\n"
+        "Up: %ud %uh %um\n"
         "Reboots: %u\n"
         "Role: %s",
         nodeName,
@@ -771,15 +781,15 @@ void DeviceStatsModule::formatNodesInfo(char* buffer, size_t bufferSize)
     if (timeValid) {
         // Show online/recent stats if time is valid
         result = snprintf(buffer, bufferSize,
-            "🌐 NETWORK NODES\n"
+            "🌐 NODES\n"
             "Online: %u (%.0f%%) [<2h]\n"
             "Recent: %u (<10m)\n"
             "Offline: %u\n"
-            "Total: %u / %u (%.0f%%)\n"
-            "Free slots: %u\n"
-            "⏰ Uptime: %ud %uh %um\n"
-            "🕐 Time: %s\n"
-            "⚠️ No time: %u nodes",
+            "Total: %u/%u (%.0f%%)\n"
+            "Free: %u\n"
+            "Up: %ud %uh %um\n"
+            "Time: %s\n"
+            "⚠️ %u no last_heard",
             onlineNodes, onlinePercent,
             recentNodes,
             offlineNodes,
@@ -791,17 +801,15 @@ void DeviceStatsModule::formatNodesInfo(char* buffer, size_t bufferSize)
     } else {
         // Time not synced - show simplified stats
         result = snprintf(buffer, bufferSize,
-            "🌐 NETWORK NODES\n"
-            "Total: %u / %u (%.0f%%)\n"
-            "Free slots: %u\n"
-            "⏰ Uptime: %ud %uh %um\n"
-            "🕐 Time: %s\n"
+            "🌐 NODES\n"
+            "Total: %u/%u (%.0f%%)\n"
+            "Free: %u\n"
+            "Up: %ud %uh %um\n"
             "⚠️ Time not synced\n"
-            "Cannot determine online/offline",
+            "Cannot determine online",
             totalNodes, maxNodes, usagePercent,
             freeSlots,
-            uptimeDays, uptimeHours, uptimeMinutes,
-            timeStr);
+            uptimeDays, uptimeHours, uptimeMinutes);
     }
                  
     // Ensure null termination for safety
@@ -871,12 +879,12 @@ void DeviceStatsModule::formatDebugInfo(char* buffer, size_t bufferSize)
     int result;
     if (timeValid) {
         result = snprintf(buffer, bufferSize,
-            "🔧 DEBUG INFO\n"
+            "🔧 DEBUG\n"
             "Heap: %u/%uKB (%u%%)\n"
             "Nodes: %u online / %u total\n"
             "NodeDB: ~%uKB (%u×250b)\n"
-            "DupeCache: %u/%u pkts (%u%%)\n"
-            "📌 Oldest packet: %us ago\n"
+            "DupeCache: %u/%u (%u%%)\n"
+            "Oldest: %us ago\n"
             "RX Q: %d/%d (free:%d)\n"
             "TX Q: %d/%d (free:%d)%s",
             usedHeap/1024, totalHeap/1024, heapPercent,
@@ -889,13 +897,13 @@ void DeviceStatsModule::formatDebugInfo(char* buffer, size_t bufferSize)
             criticalityWarning);
     } else {
         result = snprintf(buffer, bufferSize,
-            "🔧 DEBUG INFO\n"
+            "🔧 DEBUG\n"
             "Heap: %u/%uKB (%u%%)\n"
             "Nodes: %u total\n"
             "⚠️ Time not synced\n"
             "NodeDB: ~%uKB (%u×250b)\n"
-            "DupeCache: %u/%u pkts (%u%%)\n"
-            "📌 Oldest packet: %us ago\n"
+            "DupeCache: %u/%u (%u%%)\n"
+            "Oldest: %us ago\n"
             "RX Q: %d/%d (free:%d)\n"
             "TX Q: %d/%d (free:%d)%s",
             usedHeap/1024, totalHeap/1024, heapPercent,
