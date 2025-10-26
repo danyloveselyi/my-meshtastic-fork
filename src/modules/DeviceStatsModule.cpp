@@ -211,10 +211,11 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
             } else {
                 dynamic_max_nodes = maxNodes;
                 if (nodeDB && nodeDB->meshNodes) {
-                    nodeDB->meshNodes->resize(dynamic_max_nodes);
+                    // Reserve capacity without changing size (avoid creating empty nodes)
+                    nodeDB->meshNodes->reserve(dynamic_max_nodes);
                 }
                 waitingSetMaxNodesNodeId = 0;
-                snprintf(replyBuffer, sizeof(replyBuffer), "Max nodes increased to %d. Memory usage: ~%.1fKB.", 
+                snprintf(replyBuffer, sizeof(replyBuffer), "Max nodes capacity increased to %d. Reserved: ~%.1fKB.", 
                          maxNodes, (maxNodes * 250) / 1024.0f);
                 replyText = replyBuffer;
             }
@@ -502,24 +503,35 @@ void DeviceStatsModule::formatPacketStats(char* buffer, size_t bufferSize)
     float txRateHour = (uptime > 0) ? (txGood * 3600.0f / uptime) : 0.0f;
     float rxRateMin = (uptime > 0) ? ((rxGood + rxBad) * 60.0f / uptime) : 0.0f;
     float rxRateHour = (uptime > 0) ? ((rxGood + rxBad) * 3600.0f / uptime) : 0.0f;
+    
+    // Calculate success rate
+    uint32_t rxTotal = rxGood + rxBad;
+    float rxSuccessRate = (rxTotal > 0) ? (rxGood * 100.0f / rxTotal) : 0.0f;
+    
+    // Calculate relay efficiency
+    uint32_t relayTotal = txRelay + txRelayCanceled;
+    float relaySuccessRate = (relayTotal > 0) ? (txRelay * 100.0f / relayTotal) : 0.0f;
 
-    // Format packet statistics report
+    // Format packet statistics report with clear sections
     int result = snprintf(buffer, bufferSize,
         "📦 PACKET STATS\n"
-        "TX: %u total (%.1f/min %.1f/hr)\n"
-        "RX: %u good, %u bad\n"
-        "RX Rate: %.1f/min %.1f/hr\n"
-        "Relay: %u sent, %u canceled\n"
-        "Duplicates: %u\n"
-        "Channel: %.1f%% util\n"
-        "Air TX: %.1f%% util\n"
-        "Uptime: %uh %um",
-        txGood, txRateMin, txRateHour,
-        rxGood, rxBad,
+        "📤 TX: %u pkts\n"
+        "  Rate: %.1f/min, %.0f/hr\n"
+        "📥 RX: %u/%u (%.0f%% OK)\n"
+        "  Rate: %.1f/min, %.0f/hr\n"
+        "🔁 Relay: %u/%u (%.0f%% OK)\n"
+        "♻️ Dupes filtered: %u\n"
+        "📡 Channel: %.1f%% busy\n"
+        "📻 TX airtime: %.1f%%\n"
+        "⏰ Uptime: %uh %um",
+        txGood,
+        txRateMin, txRateHour,
+        rxGood, rxTotal, rxSuccessRate,
         rxRateMin, rxRateHour,
-        txRelay, txRelayCanceled,
+        txRelay, relayTotal, relaySuccessRate,
         rxDupe,
-        channelUtil, airUtilTx,
+        channelUtil,
+        airUtilTx,
         uptimeHours, uptimeMinutes);
                  
     // Ensure null termination for safety
@@ -815,7 +827,11 @@ void DeviceStatsModule::formatDebugInfo(char* buffer, size_t bufferSize)
     
     // Get actual node counts (not just max)
     uint32_t totalNodes = nodeDB ? nodeDB->getNumMeshNodes() : 0;
-    uint32_t onlineNodes = nodeDB ? nodeDB->getNumOnlineMeshNodes() : 0;
+    
+    // Check if time is valid before calculating online nodes
+    uint32_t currentTime = getValidTime(RTCQualityDevice, true);
+    bool timeValid = (currentTime > 1000000000 && currentTime < 2000000000);
+    uint32_t onlineNodes = (timeValid && nodeDB) ? nodeDB->getNumOnlineMeshNodes() : 0;
     
     // Calculate actual NodeDB memory usage
     uint32_t nodeDbBytes = totalNodes * 250;  // Real memory usage based on actual nodes
@@ -852,23 +868,45 @@ void DeviceStatsModule::formatDebugInfo(char* buffer, size_t bufferSize)
     }
     
     // Format debug information report focusing on oldest packet age (most critical metric)
-    int result = snprintf(buffer, bufferSize,
-        "🔧 DEBUG INFO\n"
-        "Heap: %u/%uKB (%u%%)\n"
-        "Nodes: %u online / %u total\n"
-        "NodeDB: ~%uKB (%u×250b)\n"
-        "DupeCache: %u/%u pkts (%u%%)\n"
-        "📌 Oldest packet: %us ago\n"
-        "RX Q: %d/%d (free:%d)\n"
-        "TX Q: %d/%d (free:%d)%s",
-        usedHeap/1024, totalHeap/1024, heapPercent,
-        onlineNodes, totalNodes,
-        nodeDbBytes/1024, totalNodes,
-        dupeCacheCount, dynamic_max_nodes, cacheFullness,
-        oldestPacketAge,
-        fromRadioUsed, fromRadioMax, fromRadioFree,
-        txUsed, txMax, txStatus.free,
-        criticalityWarning);
+    int result;
+    if (timeValid) {
+        result = snprintf(buffer, bufferSize,
+            "🔧 DEBUG INFO\n"
+            "Heap: %u/%uKB (%u%%)\n"
+            "Nodes: %u online / %u total\n"
+            "NodeDB: ~%uKB (%u×250b)\n"
+            "DupeCache: %u/%u pkts (%u%%)\n"
+            "📌 Oldest packet: %us ago\n"
+            "RX Q: %d/%d (free:%d)\n"
+            "TX Q: %d/%d (free:%d)%s",
+            usedHeap/1024, totalHeap/1024, heapPercent,
+            onlineNodes, totalNodes,
+            nodeDbBytes/1024, totalNodes,
+            dupeCacheCount, dynamic_max_nodes, cacheFullness,
+            oldestPacketAge,
+            fromRadioUsed, fromRadioMax, fromRadioFree,
+            txUsed, txMax, txStatus.free,
+            criticalityWarning);
+    } else {
+        result = snprintf(buffer, bufferSize,
+            "🔧 DEBUG INFO\n"
+            "Heap: %u/%uKB (%u%%)\n"
+            "Nodes: %u total\n"
+            "⚠️ Time not synced\n"
+            "NodeDB: ~%uKB (%u×250b)\n"
+            "DupeCache: %u/%u pkts (%u%%)\n"
+            "📌 Oldest packet: %us ago\n"
+            "RX Q: %d/%d (free:%d)\n"
+            "TX Q: %d/%d (free:%d)%s",
+            usedHeap/1024, totalHeap/1024, heapPercent,
+            totalNodes,
+            nodeDbBytes/1024, totalNodes,
+            dupeCacheCount, dynamic_max_nodes, cacheFullness,
+            oldestPacketAge,
+            fromRadioUsed, fromRadioMax, fromRadioFree,
+            txUsed, txMax, txStatus.free,
+            criticalityWarning);
+    }
                  
     // Ensure null termination for safety
     if (result >= (int)bufferSize) {

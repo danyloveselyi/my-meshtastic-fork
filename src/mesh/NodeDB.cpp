@@ -1130,6 +1130,9 @@ void NodeDB::loadFromDisk()
     }
 
 #endif
+    // Pre-allocate vector space to avoid realloc during load (reduces peak memory usage)
+    nodeDatabase.nodes.reserve(dynamic_max_nodes);
+    
     auto state = loadProto(nodeDatabaseFileName, getMaxNodesAllocatedSize(), sizeof(meshtastic_NodeDatabase),
                            &meshtastic_NodeDatabase_msg, &nodeDatabase);
     if (nodeDatabase.version < DEVICESTATE_MIN_VER) {
