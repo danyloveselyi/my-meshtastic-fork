@@ -343,6 +343,48 @@ void DeviceStatsModule::doPeriodicWork()
 
     uint32_t now = millis();
 
+    // Update packet statistics (minute/hour counters)
+    if (RadioLibInterface::instance) {
+        uint32_t currentTx = RadioLibInterface::instance->txGood;
+        uint32_t currentRx = RadioLibInterface::instance->rxGood + RadioLibInterface::instance->rxBad;
+        
+        // Initialize on first run
+        if (lastMinuteReset == 0) {
+            lastMinuteReset = now;
+            lastHourReset = now;
+            lastTxCount = currentTx;
+            lastRxCount = currentRx;
+        }
+        
+        // Calculate deltas since last update
+        uint32_t txDelta = (currentTx >= lastTxCount) ? (currentTx - lastTxCount) : 0;
+        uint32_t rxDelta = (currentRx >= lastRxCount) ? (currentRx - lastRxCount) : 0;
+        
+        // Add to minute and hour counters
+        txLastMinute += txDelta;
+        rxLastMinute += rxDelta;
+        txLastHour += txDelta;
+        rxLastHour += rxDelta;
+        
+        // Reset minute counter every 60 seconds
+        if (now - lastMinuteReset >= 60000) {
+            txLastMinute = txDelta; // Keep only current delta
+            rxLastMinute = rxDelta;
+            lastMinuteReset = now;
+        }
+        
+        // Reset hour counter every 3600 seconds
+        if (now - lastHourReset >= 3600000) {
+            txLastHour = txDelta; // Keep only current delta
+            rxLastHour = rxDelta;
+            lastHourReset = now;
+        }
+        
+        // Update last counts for next delta calculation
+        lastTxCount = currentTx;
+        lastRxCount = currentRx;
+    }
+
     // Check if monitoring is enabled and it's time to send update
     if (monitoringNodeId != 0) {
         // Handle millis() overflow safely (works for years of continuous operation)
@@ -459,29 +501,26 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     uint32_t heapUsed = (heapTotal >= (uint32_t)heapFree) ? (heapTotal - (uint32_t)heapFree) : 0;
     uint32_t freeSlots = (maxNodes > totalNodes) ? (maxNodes - totalNodes) : 0;
 
-    // Format detailed memory report
+    // Format detailed memory report (optimized - no duplication)
     int result;
     if (memValid) {
         result = snprintf(buffer, bufferSize,
-            "📊 MEMORY\n"
-            "Flash: %.0f/%.0fKB (%.0fKB free)\n"
-            "Heap: %u/%uKB (%.0fKB free)\n"
-            "Nodes: %u/%u (%u free)\n"
-            "Queues: Phone=%u Status=%u\n"
-            "Pool: ~22 pkts (~11KB)",
-            flashTotal, flashUsed, flashFree,
-            heapTotal, heapUsed, heapFree,
-            totalNodes, maxNodes, freeSlots,
-            MAX_RX_TOPHONE, MAX_RX_TOPHONE);
+            "📊 MEM\n"
+            "Flash: %.0f/%.0fKB\n"
+            "Heap: %u/%uKB\n"
+            "Nodes: %u/%u\n"
+            "Q: %u Pool: ~22",
+            flashTotal, flashUsed,
+            heapTotal, heapUsed,
+            totalNodes, maxNodes,
+            MAX_RX_TOPHONE);
     } else {
         // Fallback if memory stats are invalid
         result = snprintf(buffer, bufferSize,
-            "📊 MEMORY\n"
-            "Nodes: %u/%u (%u free)\n"
-            "Queues: Phone=%u Status=%u\n"
-            "⚠️ Memory stats unavailable",
-            totalNodes, maxNodes, freeSlots,
-            MAX_RX_TOPHONE, MAX_RX_TOPHONE);
+            "📊 MEM\n"
+            "Nodes: %u/%u\n"
+            "⚠️ Stats unavailable",
+            totalNodes, maxNodes);
     }
         
     // Debug log to verify the message is being formatted correctly
@@ -541,21 +580,6 @@ void DeviceStatsModule::formatPacketStats(char* buffer, size_t bufferSize)
         routerValid = true;
     }
     
-    // Get uptime using millis() with validation
-    uint32_t uptimeMs = millis();
-    uint32_t uptime = uptimeMs / 1000;
-    uint32_t uptimeHours = uptime / 3600;
-    uint32_t uptimeMinutes = (uptime % 3600) / 60;
-    
-    // Minimum uptime threshold to avoid division issues (10 seconds)
-    bool uptimeValid = (uptime >= 10);
-    
-    // Calculate rates (packets per minute and per hour) with validation
-    float txRateMin = (uptimeValid) ? (txGood * 60.0f / uptime) : 0.0f;
-    float txRateHour = (uptimeValid) ? (txGood * 3600.0f / uptime) : 0.0f;
-    float rxRateMin = (uptimeValid) ? ((rxGood + rxBad) * 60.0f / uptime) : 0.0f;
-    float rxRateHour = (uptimeValid) ? ((rxGood + rxBad) * 3600.0f / uptime) : 0.0f;
-    
     // Calculate success rate
     uint32_t rxTotal = rxGood + rxBad;
     float rxSuccessRate = (rxTotal > 0) ? (rxGood * 100.0f / rxTotal) : 0.0f;
@@ -564,46 +588,39 @@ void DeviceStatsModule::formatPacketStats(char* buffer, size_t bufferSize)
     uint32_t relayTotal = txRelay + txRelayCanceled;
     float relaySuccessRate = (relayTotal > 0) ? (txRelay * 100.0f / relayTotal) : 0.0f;
 
+    // Use real counters for last minute and hour (set by doPeriodicWork)
+    // If counters are not initialized yet, show 0
+    uint32_t txMin = deviceStatsModule ? deviceStatsModule->txLastMinute : 0;
+    uint32_t rxMin = deviceStatsModule ? deviceStatsModule->rxLastMinute : 0;
+    uint32_t txHr = deviceStatsModule ? deviceStatsModule->txLastHour : 0;
+    uint32_t rxHr = deviceStatsModule ? deviceStatsModule->rxLastHour : 0;
+
     // Format packet statistics report with clear sections
     int result;
     
     // Check if we have valid data from all sources
-    if (radioValid && routerValid && airtimeValid && uptimeValid) {
-        // Full report with all data
+    if (radioValid && routerValid && airtimeValid) {
+        // Full report with real minute/hour counters
         result = snprintf(buffer, bufferSize,
-            "📦 PACKETS\n"
-            "TX: %u (%.1f/m %.0f/h)\n"
-            "RX: %u/%u (%.0f%%)\n"
-            "  Rate: %.1f/m %.0f/h\n"
-            "Relay: %u/%u (%.0f%%)\n"
-            "Dupes: %u\n"
-            "Ch: %.1f%% TX air: %.1f%%\n"
-            "Up: %uh %um",
-            txGood,
-            txRateMin, txRateHour,
-            rxGood, rxTotal, rxSuccessRate,
-            rxRateMin, rxRateHour,
-            txRelay, relayTotal, relaySuccessRate,
-            rxDupe,
-            channelUtil, airUtilTx,
-            uptimeHours, uptimeMinutes);
+            "📦 PKT\n"
+            "TX: %u (%u/m, %u/h)\n"
+            "RX: %u/%u (%.0f%%) (%u/m, %u/h)\n"
+            "Relay: %u/%u Dup: %u\n"
+            "Ch: %.1f%% Air: %.1f%%",
+            txGood, txMin, txHr,
+            rxGood, rxTotal, rxSuccessRate, rxMin, rxHr,
+            txRelay, relayTotal, rxDupe,
+            channelUtil, airUtilTx);
     } else {
         // Simplified report if some data is missing
         result = snprintf(buffer, bufferSize,
-            "📦 PACKETS\n"
-            "TX: %u\n"
-            "RX: %u/%u (%.0f%%)\n"
-            "Relay: %u\n"
-            "Dupes: %u\n"
-            "Ch: %.1f%% TX air: %.1f%%\n"
-            "Up: %uh %um\n"
-            "⚠️ Stats initializing...",
+            "📦 PKT\n"
+            "TX: %u RX: %u/%u\n"
+            "Relay: %u Dup: %u\n"
+            "⚠️ Initializing...",
             txGood,
-            rxGood, rxTotal, rxSuccessRate,
-            txRelay,
-            rxDupe,
-            channelUtil, airUtilTx,
-            uptimeHours, uptimeMinutes);
+            rxGood, rxTotal,
+            txRelay, rxDupe);
     }
                  
     // Ensure null termination for safety
@@ -613,8 +630,8 @@ void DeviceStatsModule::formatPacketStats(char* buffer, size_t bufferSize)
     }
     
     // Debug log for diagnostics
-    LOG_INFO("PacketStats: radio=%d airtime=%d router=%d uptime=%d (up=%us)",
-             radioValid, airtimeValid, routerValid, uptimeValid, uptime);
+    LOG_INFO("PacketStats: radio=%d airtime=%d router=%d (tx/rx min=%u/%u hr=%u/%u)",
+             radioValid, airtimeValid, routerValid, txMin, rxMin, txHr, rxHr);
 }
 
 void DeviceStatsModule::formatPowerStats(char* buffer, size_t bufferSize)
@@ -654,23 +671,20 @@ void DeviceStatsModule::formatPowerStats(char* buffer, size_t bufferSize)
         }
     }
     
-    // Format power statistics report
+    // Format power statistics report (optimized - no voltage duplication)
     int result;
     if (powerValid) {
         result = snprintf(buffer, bufferSize,
-            "🔋 POWER\n"
-            "Source: %s%s\n"
-            "Battery: %u%% (%.2fV)\n"
-            "Voltage: %u mV",
+            "🔋 PWR\n"
+            "%s%s\n"
+            "%u%% %.2fV",
             powerSource, chargingStatus,
-            batteryPercent, batteryVoltageMv / 1000.0f,
-            batteryVoltageMv);
+            batteryPercent, batteryVoltageMv / 1000.0f);
     } else {
         // Fallback if power status is unavailable or invalid
         result = snprintf(buffer, bufferSize,
-            "🔋 POWER\n"
-            "Status: Not available\n"
-            "⚠️ Power info unavailable");
+            "🔋 PWR\n"
+            "⚠️ Unavailable");
     }
                  
     // Ensure null termination for safety
@@ -743,35 +757,19 @@ void DeviceStatsModule::formatRadioStats(char* buffer, size_t bufferSize)
     bool timeValid = (timeQuality >= RTCQualityFromNet && currentTime > 1000000000 && currentTime < 2000000000);
     uint32_t onlineNodes = (timeValid && nodeDB) ? nodeDB->getNumOnlineMeshNodes() : 0;
     
-    // Format radio statistics report with packet averages and online nodes
+    // Format radio statistics report (optimized - no packet/nodes duplication)
     int result;
-    if (radioValid && uptimeValid && timeValid) {
-        // Full report with all valid data
+    if (radioValid) {
         result = snprintf(buffer, bufferSize,
-            "📡 RADIO\n"
-            "Freq: %.3f MHz Ch: %u\n"
-            "SF: %u BW: %.1f kHz\n"
-            "Power: %d dBm\n"
-            "TX avg: %.1f/m %.1f/h\n"
-            "RX avg: %.1f/m %.1f/h\n"
-            "Online: %u nodes",
+            "📡 RF\n"
+            "%.3f MHz Ch%u\n"
+            "SF%u BW%.0f %ddBm",
             frequency, channel,
-            sf, bw,
-            power,
-            txAvgMin, txAvgHour,
-            rxAvgMin, rxAvgHour,
-            onlineNodes);
+            sf, bw, power);
     } else {
-        // Simplified report if some data is invalid
         result = snprintf(buffer, bufferSize,
-            "📡 RADIO\n"
-            "Freq: %.3f MHz Ch: %u\n"
-            "SF: %u BW: %.1f kHz\n"
-            "Power: %d dBm\n"
-            "⚠️ Stats initializing...",
-            frequency, channel,
-            sf, bw,
-            power);
+            "📡 RF\n"
+            "⚠️ Initializing...");
     }
                  
     // Ensure null termination for safety
@@ -819,34 +817,31 @@ void DeviceStatsModule::formatStatusInfo(char* buffer, size_t bufferSize)
         nodeValid = true;
     }
     
-    // Format status information report
+    // Format status information report (optimized)
     int result;
     if (nodeValid) {
+        const char* roleShort = 
+            config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER ? "R" :
+            config.device.role == meshtastic_Config_DeviceConfig_Role_REPEATER ? "Rep" :
+            config.device.role == meshtastic_Config_DeviceConfig_Role_CLIENT ? "C" : "?";
+        
         result = snprintf(buffer, bufferSize,
-            "ℹ️ STATUS\n"
-            "Name: %s\n"
-            "ID: !%08x\n"
+            "ℹ️ STA\n"
+            "%s !%08x\n"
             "Up: %ud %uh %um\n"
-            "Reboots: %u\n"
-            "Role: %s",
+            "Boots: %u Role: %s",
             nodeName,
             nodeId,
             uptimeDays, uptimeHours, uptimeMinutes,
-            rebootCount,
-            config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER ? "Router" :
-            config.device.role == meshtastic_Config_DeviceConfig_Role_REPEATER ? "Repeater" :
-            config.device.role == meshtastic_Config_DeviceConfig_Role_CLIENT ? "Client" : "Unknown");
+            rebootCount, roleShort);
     } else {
-        // Fallback if nodeDB is not available
         result = snprintf(buffer, bufferSize,
-            "ℹ️ STATUS\n"
-            "Name: %s\n"
+            "ℹ️ STA\n"
+            "%s\n"
             "Up: %ud %uh %um\n"
-            "Reboots: %u\n"
-            "⚠️ NodeDB unavailable",
+            "⚠️ No NodeDB",
             nodeName,
-            uptimeDays, uptimeHours, uptimeMinutes,
-            rebootCount);
+            uptimeDays, uptimeHours, uptimeMinutes);
     }
                  
     // Ensure null termination for safety
@@ -940,41 +935,28 @@ void DeviceStatsModule::formatNodesInfo(char* buffer, size_t bufferSize)
         }
     }
     
-    // Format nodes information report with diagnostic data
+    // Format nodes information report (optimized - no uptime duplication)
     int result;
     if (timeValid) {
         // Show online/recent stats if time is valid
         result = snprintf(buffer, bufferSize,
-            "🌐 NODES\n"
-            "Online: %u (%.0f%%) [<2h]\n"
-            "Recent: %u (<10m)\n"
-            "Offline: %u\n"
-            "Total: %u/%u (%.0f%%)\n"
-            "Free: %u\n"
-            "Up: %ud %uh %um\n"
-            "Time: %s\n"
-            "⚠️ %u no last_heard",
+            "🌐 NOD\n"
+            "On: %u (%.0f%%) <2h\n"
+            "Rec: %u <10m\n"
+            "Tot: %u/%u (%.0f%%)\n"
+            "T: %s",
             onlineNodes, onlinePercent,
             recentNodes,
-            offlineNodes,
             totalNodes, maxNodes, usagePercent,
-            freeSlots,
-            uptimeDays, uptimeHours, uptimeMinutes,
-            timeStr,
-            nodesWithZeroTime);
+            timeStr);
     } else {
-        // Time not synced - show simplified stats with reason
+        // Time not synced - show simplified stats
         result = snprintf(buffer, bufferSize,
-            "🌐 NODES\n"
-            "Total: %u/%u (%.0f%%)\n"
-            "Free: %u\n"
-            "Up: %ud %uh %um\n"
-            "Time: %s\n"
-            "⚠️ Need time from Net/GPS\n"
-            "Cannot determine online",
+            "🌐 NOD\n"
+            "Tot: %u/%u (%.0f%%)\n"
+            "T: %s\n"
+            "⚠️ Need Net/GPS time",
             totalNodes, maxNodes, usagePercent,
-            freeSlots,
-            uptimeDays, uptimeHours, uptimeMinutes,
             timeStr);
     }
                  
@@ -1044,60 +1026,40 @@ void DeviceStatsModule::formatDebugInfo(char* buffer, size_t bufferSize)
         criticalityWarning = "\n⚠️ DupeCache >85% full";
     }
     
-    // Format time quality string for debug output
-    const char* timeQualityStr = RtcName(timeQuality);
-    
-    // Format debug information report focusing on oldest packet age (most critical metric)
+    // Format debug information report (optimized - compact format)
     int result;
     if (timeValid) {
         result = snprintf(buffer, bufferSize,
-            "🔧 DEBUG\n"
-            "Heap: %u/%uKB (%u%%)\n"
-            "Nodes: %u online / %u total\n"
-            "NodeDB: ~%uKB (%u×250b)\n"
-            "DupeCache: %u/%u (%u%%)\n"
-            "Oldest: %us ago\n"
-            "RX Q: %d/%d (free:%d)\n"
-            "TX Q: %d/%d (free:%d)\n"
-            "Time: %s%s",
+            "🔧 DBG\n"
+            "H: %u/%uKB (%u%%)\n"
+            "N: %u/%u DB:%uKB\n"
+            "Dup: %u/%u (%u%%) %us\n"
+            "RXQ: %d/%d TXQ: %d/%d\n"
+            "T: %s%s",
             usedHeap/1024, totalHeap/1024, heapPercent,
-            onlineNodes, totalNodes,
-            nodeDbBytes/1024, totalNodes,
-            dupeCacheCount, dynamic_max_nodes, cacheFullness,
-            oldestPacketAge,
-            fromRadioUsed, fromRadioMax, fromRadioFree,
-            txUsed, txMax, txStatus.free,
-            timeQualityStr,
+            onlineNodes, totalNodes, nodeDbBytes/1024,
+            dupeCacheCount, dynamic_max_nodes, cacheFullness, oldestPacketAge,
+            fromRadioUsed, fromRadioMax, txUsed, txMax,
+            RtcName(timeQuality),
             criticalityWarning);
     } else {
-        // Show detailed reason why time is not synced
-        const char* timeIssue;
-        if (timeQuality == RTCQualityNone) {
-            timeIssue = "None - awaiting sync";
-        } else if (timeQuality == RTCQualityDevice) {
-            timeIssue = "RTC only - need Net/GPS";
-        } else {
-            timeIssue = "Invalid range";
-        }
+        // Show simplified when time is not synced
+        const char* timeShort = 
+            (timeQuality == RTCQualityNone) ? "None" :
+            (timeQuality == RTCQualityDevice) ? "RTC" : "?";
         
         result = snprintf(buffer, bufferSize,
-            "🔧 DEBUG\n"
-            "Heap: %u/%uKB (%u%%)\n"
-            "Nodes: %u total\n"
-            "NodeDB: ~%uKB (%u×250b)\n"
-            "DupeCache: %u/%u (%u%%)\n"
-            "Oldest: %us ago\n"
-            "RX Q: %d/%d (free:%d)\n"
-            "TX Q: %d/%d (free:%d)\n"
-            "⚠️ Time: %s%s",
+            "🔧 DBG\n"
+            "H: %u/%uKB (%u%%)\n"
+            "N: %u DB:%uKB\n"
+            "Dup: %u/%u %us\n"
+            "RXQ: %d/%d TXQ: %d/%d\n"
+            "⚠️T: %s%s",
             usedHeap/1024, totalHeap/1024, heapPercent,
-            totalNodes,
-            nodeDbBytes/1024, totalNodes,
-            dupeCacheCount, dynamic_max_nodes, cacheFullness,
-            oldestPacketAge,
-            fromRadioUsed, fromRadioMax, fromRadioFree,
-            txUsed, txMax, txStatus.free,
-            timeIssue,
+            totalNodes, nodeDbBytes/1024,
+            dupeCacheCount, dynamic_max_nodes, oldestPacketAge,
+            fromRadioUsed, fromRadioMax, txUsed, txMax,
+            timeShort,
             criticalityWarning);
     }
                  

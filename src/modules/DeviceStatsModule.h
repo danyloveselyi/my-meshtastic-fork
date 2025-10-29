@@ -44,9 +44,21 @@ class DeviceStatsModule : public SinglePortModule, public Observable<const mesht
       // Interactive setup variables
       uint32_t waitingIntervalNodeId = 0; // Node ID waiting for interval input (0 = not waiting)
       uint32_t waitingMaxNodesNodeId = 0; // Node ID waiting for max nodes input (0 = not waiting)
+      
+      // Packet statistics tracking (private internals)
+      uint32_t lastMinuteReset = 0;   // Timestamp of last minute reset
+      uint32_t lastHourReset = 0;     // Timestamp of last hour reset
+      uint32_t lastTxCount = 0;       // Previous TX count for delta calculation
+      uint32_t lastRxCount = 0;       // Previous RX count for delta calculation
 
   public:
       void doPeriodicWork(); // Called periodically to send monitoring updates
+      
+      // Packet statistics for last minute/hour (public for formatPacketStats access)
+      uint32_t txLastMinute = 0;      // TX packets in last minute
+      uint32_t rxLastMinute = 0;      // RX packets in last minute
+      uint32_t txLastHour = 0;        // TX packets in last hour
+      uint32_t rxLastHour = 0;        // RX packets in last hour
 };
 
 extern DeviceStatsModule *deviceStatsModule;
