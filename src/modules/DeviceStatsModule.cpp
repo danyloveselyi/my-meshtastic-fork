@@ -2,14 +2,22 @@
 #include <cstring>
 
 // Helper: trim leading/trailing whitespace in-place
+// Embedded-safe version with bounded string operations
+#define MAX_TRIM_LENGTH 512  // Safety limit for string operations
+
 void trim(char* s) {
     if (!s) return;
     // Trim leading
     char* start = s;
-    while (*start && isspace((unsigned char)*start)) start++;
-    if (start != s) memmove(s, start, strlen(start) + 1);
+    size_t max_scan = MAX_TRIM_LENGTH;
+    while (*start && isspace((unsigned char)*start) && max_scan-- > 0) start++;
+    
+    // Use strnlen instead of strlen for safety (prevents unbounded memory reads)
+    size_t len = strnlen(start, MAX_TRIM_LENGTH);
+    if (start != s) memmove(s, start, len + 1);
+    
     // Trim trailing
-    size_t len = strlen(s);
+    len = strnlen(s, MAX_TRIM_LENGTH);
     while (len > 0 && isspace((unsigned char)s[len-1])) s[--len] = 0;
 }
 #include "DeviceStatsModule.h"
@@ -42,12 +50,13 @@ extern uint32_t dynamic_max_nodes;
 static const char* MONITORING_PIN_CODE = "123456";
 
 // Context variables for interactive commands (per user)
+// Marked as volatile for RTOS thread-safety (prevents compiler optimization issues)
 // For /setmaxnodes: waiting for nodes,pin
-static uint32_t waitingSetMaxNodesNodeId = 0;
+static volatile uint32_t waitingSetMaxNodesNodeId = 0;
 // For /monstart: waiting for interval,pin
-static uint32_t waitingMonStartNodeId = 0;
+static volatile uint32_t waitingMonStartNodeId = 0;
 // For /monstop: waiting for pin
-static uint32_t waitingMonStopNodeId = 0;
+static volatile uint32_t waitingMonStopNodeId = 0;
 
 // DEFAULT_MAX_NODES is defined per variant:
 // - rak4631_eth_gw: extern const uint32_t DEFAULT_MAX_NODES = 350
@@ -82,10 +91,17 @@ ProcessMessage DeviceStatsModule::handleReceived(const meshtastic_MeshPacket &mp
 
 void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
 {
-    // Use fixed size buffers instead of std::string to avoid dynamic allocation
-    char originalText[256];
-    char lowerText[256];
-    char replyBuffer[256];
+    // Use static buffers to avoid stack overflow on embedded systems (768 bytes is too much for stack)
+    // Static buffers are thread-safe here because this function is called from message handler
+    static char originalText[256];
+    static char lowerText[256];
+    static char replyBuffer[256];
+
+    // Critical: validate payload pointer before memcpy (embedded safety)
+    if (!original.decoded.payload.bytes || original.decoded.payload.size == 0) {
+        LOG_ERROR("Invalid payload - bytes is NULL or size is 0");
+        return;
+    }
 
     // Safely copy original text
     size_t textLen = std::min((size_t)original.decoded.payload.size, sizeof(originalText) - 1);
@@ -188,8 +204,10 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
     } else if (waitingSetMaxNodesNodeId == original.from) {
         // User is setting max nodes value with PIN
         // Format: value,pin
-        char* valueStr = strtok(originalText, ",");
-        char* pinStr = strtok(nullptr, ",");
+        // Use strtok_r for thread-safety in RTOS environment
+        char* saveptr = nullptr;
+        char* valueStr = strtok_r(originalText, ",", &saveptr);
+        char* pinStr = strtok_r(nullptr, ",", &saveptr);
         int maxNodes = valueStr ? atoi(valueStr) : 0;
         if (pinStr) trim(pinStr);
         bool pinOk = pinStr && strcmp(pinStr, MONITORING_PIN_CODE) == 0;
@@ -231,8 +249,10 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
     } else if (waitingMonStartNodeId == original.from) {
         // User is setting up monitoring interval with PIN (monstart)
         // Format: value,pin
-        char* valueStr = strtok(originalText, ",");
-        char* pinStr = strtok(nullptr, ",");
+        // Use strtok_r for thread-safety in RTOS environment
+        char* saveptr = nullptr;
+        char* valueStr = strtok_r(originalText, ",", &saveptr);
+        char* pinStr = strtok_r(nullptr, ",", &saveptr);
         int interval = valueStr ? atoi(valueStr) : 0;
         if (pinStr) trim(pinStr);
         bool pinOk = pinStr && strcmp(pinStr, MONITORING_PIN_CODE) == 0;
@@ -273,6 +293,16 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
         replyText = replyBuffer;
     }
 
+    // Critical: check router pointer before use (embedded safety)
+    if (!router) {
+        LOG_ERROR("Router is NULL - cannot send reply!");
+        // Reset all waiting states to prevent hanging
+        waitingSetMaxNodesNodeId = 0;
+        waitingMonStartNodeId = 0;
+        waitingMonStopNodeId = 0;
+        return;
+    }
+
     meshtastic_MeshPacket *reply = router->allocForSending();
     if (!reply) {
         LOG_ERROR("Failed to allocate packet - memory exhausted! Resetting command states.");
@@ -305,14 +335,22 @@ void DeviceStatsModule::sendMemoryStats(uint32_t toNode)
     // Counter will safely overflow from UINT32_MAX back to 0 after ~136 years at 30s intervals
 
     // Format monitoring message with counter in square brackets using detailed formatting
-    char statsBuffer[400];
-    char prefix[20];
+    // Use static buffers to avoid stack overflow (850 bytes is too much for embedded stack)
+    static char statsBuffer[400];
+    static char prefixedBuffer[450];
+    char prefix[20];  // Keep small buffer on stack
     snprintf(prefix, sizeof(prefix), "[ %u ] ", monitorMessageCounter);
     formatDetailedMemoryStats(statsBuffer, sizeof(statsBuffer));
     
     // Add prefix to the detailed report
-    char prefixedBuffer[450];
     snprintf(prefixedBuffer, sizeof(prefixedBuffer), "%s%s", prefix, statsBuffer);
+
+    // Critical: check router pointer before use (embedded safety)
+    if (!router) {
+        LOG_ERROR("Router is NULL - cannot send memory stats!");
+        monitoringNodeId = 0;  // Disable monitoring
+        return;
+    }
 
     // Allocate packet with safety check for long-term monitoring
     meshtastic_MeshPacket *reply = router->allocForSending();
