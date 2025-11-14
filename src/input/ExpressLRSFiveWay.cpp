@@ -238,7 +238,9 @@ void ExpressLRSFiveWay::shutdown()
     screen->startAlert("Shutting down...");
     // Don't set alerting = true. We don't want to auto-dismiss this alert.
 
+#ifndef MESHTASTIC_EXCLUDE_RTTTL
     playShutdownMelody(); // In case user adds a buzzer
+#endif
 
     shutdownAtMsec = millis() + 3000;
 }

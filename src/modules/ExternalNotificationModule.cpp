@@ -24,11 +24,19 @@
 #include "mesh/generated/meshtastic/rtttl.pb.h"
 #include <Arduino.h>
 
-#ifdef HAS_NCP5623
+#if defined(HAS_NCP5623) && !defined(FEATURE_RGB_LED_DISABLED)
+#define MESHTASTIC_HAS_NCP5623
+#endif
+
+#if defined(HAS_LP5562) && !defined(FEATURE_RGB_LED_DISABLED)
+#define MESHTASTIC_HAS_LP5562
+#endif
+
+#ifdef MESHTASTIC_HAS_NCP5623
 #include <graphics/RAKled.h>
 #endif
 
-#ifdef HAS_LP5562
+#ifdef MESHTASTIC_HAS_LP5562
 #include <graphics/NomadStarLED.h>
 #endif
 
@@ -138,12 +146,12 @@ int32_t ExternalNotificationModule::runOnce()
             green = (colorState & 2) ? brightnessValues[brightnessIndex] : 0;        // Green enabled on colorState = 2,3,6,7
             blue = (colorState & 1) ? (brightnessValues[brightnessIndex] * 1.5) : 0; // Blue enabled on colorState = 1,3,5,7
             white = (colorState & 12) ? brightnessValues[brightnessIndex] : 0;
-#ifdef HAS_NCP5623
+#ifdef MESHTASTIC_HAS_NCP5623
             if (rgb_found.type == ScanI2C::NCP5623) {
                 rgb.setColor(red, green, blue);
             }
 #endif
-#ifdef HAS_LP5562
+#ifdef MESHTASTIC_HAS_LP5562
             if (rgb_found.type == ScanI2C::LP5562) {
                 rgbw.setColor(red, green, blue, white);
             }
@@ -253,12 +261,12 @@ void ExternalNotificationModule::setExternalState(uint8_t index, bool on)
     }
 #endif
 
-#ifdef HAS_NCP5623
+#ifdef MESHTASTIC_HAS_NCP5623
     if (rgb_found.type == ScanI2C::NCP5623) {
         rgb.setColor(red, green, blue);
     }
 #endif
-#ifdef HAS_LP5562
+#ifdef MESHTASTIC_HAS_LP5562
     if (rgb_found.type == ScanI2C::LP5562) {
         rgbw.setColor(red, green, blue, white);
     }
@@ -376,13 +384,13 @@ ExternalNotificationModule::ExternalNotificationModule()
                 LOG_INFO("Use Pin %i in PWM mode", config.device.buzzer_gpio);
             }
         }
-#ifdef HAS_NCP5623
+#ifdef MESHTASTIC_HAS_NCP5623
         if (rgb_found.type == ScanI2C::NCP5623) {
             rgb.begin();
             rgb.setCurrent(10);
         }
 #endif
-#ifdef HAS_LP5562
+#ifdef MESHTASTIC_HAS_LP5562
         if (rgb_found.type == ScanI2C::LP5562) {
             rgbw.begin();
             rgbw.setCurrent(20);

@@ -1,12 +1,20 @@
 #include "Observer.h"
 #include "configuration.h"
 
-#ifdef HAS_NCP5623
+#if defined(HAS_NCP5623) && !defined(FEATURE_RGB_LED_DISABLED)
+#define MESHTASTIC_HAS_NCP5623
+#endif
+
+#if defined(HAS_LP5562) && !defined(FEATURE_RGB_LED_DISABLED)
+#define MESHTASTIC_HAS_LP5562
+#endif
+
+#ifdef MESHTASTIC_HAS_NCP5623
 #include <graphics/RAKled.h>
 NCP5623 rgb;
 #endif
 
-#ifdef HAS_LP5562
+#ifdef MESHTASTIC_HAS_LP5562
 #include <graphics/NomadStarLED.h>
 LP5562 rgbw;
 #endif
@@ -44,7 +52,7 @@ class AmbientLightingThread : public concurrency::OSThread
         // moduleConfig.ambient_lighting.green = (myNodeInfo.my_node_num & 0x00FF00) >> 8;
         // moduleConfig.ambient_lighting.blue = myNodeInfo.my_node_num & 0x0000FF;
 
-#if defined(HAS_NCP5623) || defined(HAS_LP5562)
+#if defined(MESHTASTIC_HAS_NCP5623) || defined(MESHTASTIC_HAS_LP5562)
         _type = type;
         if (_type == ScanI2C::DeviceType::NONE) {
             LOG_DEBUG("AmbientLighting Disable due to no RGB leds found on I2C bus");
@@ -59,11 +67,11 @@ class AmbientLightingThread : public concurrency::OSThread
             return;
         }
         LOG_DEBUG("AmbientLighting init");
-#ifdef HAS_NCP5623
+#ifdef MESHTASTIC_HAS_NCP5623
         if (_type == ScanI2C::NCP5623) {
             rgb.begin();
 #endif
-#ifdef HAS_LP5562
+#ifdef MESHTASTIC_HAS_LP5562
             if (_type == ScanI2C::LP5562) {
                 rgbw.begin();
 #endif
@@ -79,7 +87,7 @@ class AmbientLightingThread : public concurrency::OSThread
 #endif
                 setLighting();
 #endif
-#if defined(HAS_NCP5623) || defined(HAS_LP5562)
+#if defined(MESHTASTIC_HAS_NCP5623) || defined(MESHTASTIC_HAS_LP5562)
             }
 #endif
         }
@@ -88,12 +96,12 @@ class AmbientLightingThread : public concurrency::OSThread
         int32_t runOnce() override
         {
 #ifdef HAS_RGB_LED
-#if defined(HAS_NCP5623) || defined(HAS_LP5562)
+#if defined(MESHTASTIC_HAS_NCP5623) || defined(MESHTASTIC_HAS_LP5562)
             if ((_type == ScanI2C::NCP5623 || _type == ScanI2C::LP5562) && moduleConfig.ambient_lighting.led_state) {
 #endif
                 setLighting();
                 return 30000; // 30 seconds to reset from any animations that may have been running from Ext. Notification
-#if defined(HAS_NCP5623) || defined(HAS_LP5562)
+#if defined(MESHTASTIC_HAS_NCP5623) || defined(MESHTASTIC_HAS_LP5562)
             }
 #endif
 #endif
@@ -110,14 +118,14 @@ class AmbientLightingThread : public concurrency::OSThread
         // Turn RGB lighting off, is used in junction to shutdown()
         int setLightingOff(void *unused)
         {
-#ifdef HAS_NCP5623
+#ifdef MESHTASTIC_HAS_NCP5623
             rgb.setCurrent(0);
             rgb.setRed(0);
             rgb.setGreen(0);
             rgb.setBlue(0);
             LOG_INFO("OFF: NCP5623 Ambient lighting");
 #endif
-#ifdef HAS_LP5562
+#ifdef MESHTASTIC_HAS_LP5562
             rgbw.setCurrent(0);
             rgbw.setRed(0);
             rgbw.setGreen(0);
@@ -150,7 +158,7 @@ class AmbientLightingThread : public concurrency::OSThread
 
         void setLighting()
         {
-#ifdef HAS_NCP5623
+#ifdef MESHTASTIC_HAS_NCP5623
             rgb.setCurrent(moduleConfig.ambient_lighting.current);
             rgb.setRed(moduleConfig.ambient_lighting.red);
             rgb.setGreen(moduleConfig.ambient_lighting.green);
@@ -159,7 +167,7 @@ class AmbientLightingThread : public concurrency::OSThread
                       moduleConfig.ambient_lighting.current, moduleConfig.ambient_lighting.red,
                       moduleConfig.ambient_lighting.green, moduleConfig.ambient_lighting.blue);
 #endif
-#ifdef HAS_LP5562
+#ifdef MESHTASTIC_HAS_LP5562
             rgbw.setCurrent(moduleConfig.ambient_lighting.current);
             rgbw.setRed(moduleConfig.ambient_lighting.red);
             rgbw.setGreen(moduleConfig.ambient_lighting.green);

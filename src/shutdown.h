@@ -49,7 +49,9 @@ void powerCommandsCheck()
     if (shutdownAtMsec && millis() > shutdownAtMsec) {
         LOG_INFO("Shut down from admin command");
 #if defined(ARCH_NRF52) || defined(ARCH_ESP32) || defined(ARCH_RP2040)
+#ifndef MESHTASTIC_EXCLUDE_RTTTL
         playShutdownMelody();
+#endif
         power->shutdown();
 #elif defined(ARCH_PORTDUINO)
         exit(EXIT_SUCCESS);

@@ -1,4 +1,18 @@
 #include "buzz.h"
+
+#if defined(MESHTASTIC_EXCLUDE_RTTTL) || defined(MESHTASTIC_EXCLUDE_AUDIO)
+
+// Audio support stripped from the build – provide no-op stubs to satisfy callers without
+// pulling in Tone/RTTTL code or extra flash usage.
+void playBeep() {}
+void playLongBeep() {}
+void playStartMelody() {}
+void playShutdownMelody() {}
+void playGPSEnableBeep() {}
+void playGPSDisableBeep() {}
+
+#else
+
 #include "NodeDB.h"
 #include "configuration.h"
 
@@ -87,3 +101,5 @@ void playShutdownMelody()
     ToneDuration melody[] = {{NOTE_CS4, DURATION_1_8}, {NOTE_AS3, DURATION_1_8}, {NOTE_FS3, DURATION_1_4}};
     playTones(melody, sizeof(melody) / sizeof(ToneDuration));
 }
+
+#endif

@@ -210,7 +210,7 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                 SCAN_SIMPLE_CASE(BBQ10_KB_ADDR, BBQ10KB, "BB Q10", (uint8_t)addr.address);
 
                 SCAN_SIMPLE_CASE(ST7567_ADDRESS, SCREEN_ST7567, "ST7567", (uint8_t)addr.address);
-#ifdef HAS_NCP5623
+#if defined(HAS_NCP5623) && !defined(FEATURE_RGB_LED_DISABLED)
                 SCAN_SIMPLE_CASE(NCP5623_ADDR, NCP5623, "NCP5623", (uint8_t)addr.address);
 #endif
 #ifdef HAS_LP5562
@@ -273,7 +273,7 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                     break;
                 }
                 break;
-#ifndef HAS_NCP5623
+#if !defined(HAS_NCP5623) || defined(FEATURE_RGB_LED_DISABLED)
             case AHT10_ADDR:
                 logFoundDevice("AHT10", (uint8_t)addr.address);
                 type = AHT10;

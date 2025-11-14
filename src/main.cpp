@@ -786,8 +786,11 @@ void setup()
         IS_ONE_OF(config.device.role, meshtastic_Config_DeviceConfig_Role_TRACKER,
                   meshtastic_Config_DeviceConfig_Role_TAK_TRACKER, meshtastic_Config_DeviceConfig_Role_SENSOR))
         LOG_DEBUG("Tracker/Sensor: Skip start melody");
-    else
+    else {
+#ifndef MESHTASTIC_EXCLUDE_RTTTL
         playStartMelody();
+#endif
+    }
 
 #if !HAS_TFT
     // fixed screen override?

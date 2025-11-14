@@ -303,7 +303,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 
 // Support multiple RGB LED configuration
-#if defined(HAS_NCP5623) || defined(HAS_LP5562) || defined(RGBLED_RED) || defined(HAS_NEOPIXEL) || defined(UNPHONE)
+#if !defined(FEATURE_RGB_LED_DISABLED) &&                                                                                                     \
+   (defined(HAS_NCP5623) || defined(HAS_LP5562) || defined(RGBLED_RED) || defined(HAS_NEOPIXEL) || defined(UNPHONE))
 #define HAS_RGB_LED
 #endif
 
