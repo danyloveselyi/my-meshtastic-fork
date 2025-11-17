@@ -46,6 +46,7 @@ void trim(char* s) {
 #include "modules/Telemetry/DeviceTelemetry.h"
 #include "PowerStatus.h"
 #include "RTC.h"
+#include "FSCommon.h"
 #include <time.h>
 
 extern Router *router;
@@ -888,9 +889,24 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     }
 
     // Get memory statistics with safety checks and validation
-    uint32_t flashTotal = MemoryStats::getFlashTotal();
-    uint32_t flashUsed = MemoryStats::getFlashUsed();  // This is firmware size (~327KB)
-    uint32_t flashFree = MemoryStats::getFlashFree();
+    // For platforms with external flash filesystem (like NRF52 with SPI flash), 
+    // show filesystem stats instead of internal flash
+    uint32_t flashTotal = 0;
+    uint32_t flashUsed = 0;
+    uint32_t flashFree = 0;
+    
+#ifdef FSCom
+    // Use filesystem stats (external flash where node data is stored)
+    flashTotal = FSCom.totalBytes();
+    flashUsed = FSCom.usedBytes();
+    flashFree = (flashTotal > flashUsed) ? (flashTotal - flashUsed) : 0;
+#else
+    // Fallback to internal flash stats (for platforms without external filesystem)
+    flashTotal = MemoryStats::getFlashTotal();
+    flashUsed = MemoryStats::getFlashUsed();
+    flashFree = MemoryStats::getFlashFree();
+#endif
+    
     uint32_t heapTotal = MemoryStats::getHeapTotal();
     uint32_t heapFree = MemoryStats::getHeapFree();
 
