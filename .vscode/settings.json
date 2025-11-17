@@ -10,5 +10,9 @@
   },
   "[powershell]": {
     "editor.defaultFormatter": "ms-vscode.powershell"
+  },
+  "files.associations": {
+    "atomic": "cpp",
+    "vector": "cpp"
   }
 }

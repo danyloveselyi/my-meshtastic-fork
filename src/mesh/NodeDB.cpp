@@ -1131,7 +1131,19 @@ void NodeDB::loadFromDisk()
         LOG_WARN("Node count %d exceeds MAX_NUM_NODES %d, truncating", numMeshNodes, MAX_NUM_NODES);
         numMeshNodes = MAX_NUM_NODES;
     }
-    meshNodes->resize(MAX_NUM_NODES);
+
+    // Pre-allocate vector to MAX_NUM_NODES to avoid multiple reallocations during runtime
+    // This happens once at boot when memory is still available
+    if (meshNodes->size() < MAX_NUM_NODES) {
+        uint32_t freeBefore = memGet.getFreeHeap();
+        size_t sizeBefore = meshNodes->size();
+        LOG_INFO("Expanding NodeDB vector from %d to %d nodes. Free heap before: %u bytes",
+                 sizeBefore, MAX_NUM_NODES, freeBefore);
+        meshNodes->resize(MAX_NUM_NODES);
+        uint32_t freeAfter = memGet.getFreeHeap();
+        LOG_INFO("NodeDB vector expanded. Free heap after: %u bytes (delta: %d bytes)",
+                 freeAfter, (int32_t)freeAfter - (int32_t)freeBefore);
+    }
 
     // static DeviceState scratch; We no longer read into a tempbuf because this structure is 15KB of valuable RAM
     state = loadProto(deviceStateFileName, meshtastic_DeviceState_size, sizeof(meshtastic_DeviceState),
@@ -1317,14 +1329,39 @@ bool NodeDB::saveDeviceStateToDisk()
 #ifdef FSCom
     spiLock->lock();
     FSCom.mkdir("/prefs");
+
+    // Check actual file size and log flash storage info for large databases
+    size_t actualFileSize = 0;
+    auto f = FSCom.open(deviceStateFileName, FILE_O_READ);
+    if (f) {
+        actualFileSize = f.size();
+        f.close();
+    }
+    
+    // Calculate actual encoded protobuf size for accurate estimation
+    size_t encodedSize = 0;
+    pb_get_encoded_size(&encodedSize, meshtastic_DeviceState_fields, &devicestate);
+    
+    // Log if file is large (>50KB) or if we expect a large encoded size
+    if (actualFileSize > 50000 || encodedSize > 50000) {
+        size_t totalBytes = FSCom.totalBytes();
+        size_t usedBytes = FSCom.usedBytes();
+        if (actualFileSize > 0) {
+            LOG_INFO("Flash storage: %u/%u bytes used (%u free, DeviceState file: %u bytes, encoded: %u bytes)",
+                     usedBytes, totalBytes, totalBytes - usedBytes, actualFileSize, encodedSize);
+        } else {
+            LOG_INFO("Flash storage: %u/%u bytes used (%u free, encoded DeviceState: %u bytes)",
+                     usedBytes, totalBytes, totalBytes - usedBytes, encodedSize);
+        }
+    }
+
     spiLock->unlock();
 #endif
-    // Note: if MAX_NUM_NODES=100 and meshtastic_NodeInfoLite_size=166, so will be approximately 17KB
+    // Note: Protobuf encoding is much more compact than in-memory structures
+    // Large node databases can still be 50-100KB when encoded
     // Because so huge we _must_ not use fullAtomic, because the filesystem is probably too small to hold two copies of this
-    return saveProto(deviceStateFileName, meshtastic_DeviceState_size, &meshtastic_DeviceState_msg, &devicestate, true);
-}
-
-bool NodeDB::saveNodeDatabaseToDisk()
+    return saveProto(deviceStateFileName, meshtastic_DeviceState_size, &meshtastic_DeviceState_msg, &devicestate, false);
+}bool NodeDB::saveNodeDatabaseToDisk()
 {
 #ifdef FSCom
     spiLock->lock();
@@ -1673,10 +1710,11 @@ meshtastic_NodeInfoLite *NodeDB::getMeshNode(NodeNum n)
     return NULL;
 }
 
-// returns true if the maximum number of nodes is reached or we are running low on memory
+// returns true if we are running low on memory
+// Note: Node count limit is checked separately in getOrCreateMeshNode() using dynamic_max_nodes
 bool NodeDB::isFull()
 {
-    return (numMeshNodes >= MAX_NUM_NODES) || (memGet.getFreeHeap() < MINIMUM_SAFE_FREE_HEAP);
+    return (memGet.getFreeHeap() < MINIMUM_SAFE_FREE_HEAP);
 }
 
 /// Find a node in our DB, create an empty NodeInfo if missing
@@ -1685,9 +1723,19 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
     meshtastic_NodeInfoLite *lite = getMeshNode(n);
 
     if (!lite) {
-        if (isFull()) {
-            LOG_INFO("Node database full with %i nodes and %u bytes free. Erasing oldest entry", numMeshNodes,
-                     memGet.getFreeHeap());
+        // Check node limit and memory constraints
+        bool reachedNodeLimit = (numMeshNodes >= MAX_NUM_NODES);
+        bool lowMemory = isFull();
+
+        if (reachedNodeLimit || lowMemory) {
+            if (reachedNodeLimit) {
+                LOG_INFO("Node database full: %u/%u nodes", numMeshNodes, MAX_NUM_NODES);
+            }
+            if (lowMemory) {
+                LOG_WARN("Low memory: %u bytes free (minimum: %u)",
+                         memGet.getFreeHeap(), MINIMUM_SAFE_FREE_HEAP);
+            }
+            LOG_INFO("Erasing oldest entry");
             // look for oldest node and erase it
             uint32_t oldest = UINT32_MAX;
             uint32_t oldestBoring = UINT32_MAX;
@@ -1721,6 +1769,8 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                 (numMeshNodes)--;
             }
         }
+
+        // Vector is pre-allocated at boot to MAX_NUM_NODES - no dynamic expansion needed
         // add the node at the end
         lite = &meshNodes->at((numMeshNodes)++);
 
