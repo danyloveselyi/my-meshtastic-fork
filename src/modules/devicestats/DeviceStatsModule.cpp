@@ -47,6 +47,7 @@ void trim(char* s) {
 #include "PowerStatus.h"
 #include "RTC.h"
 #include "FSCommon.h"
+#include "SPILock.h"
 #include <time.h>
 
 extern Router *router;
@@ -889,24 +890,39 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     }
 
     // Get memory statistics with safety checks and validation
-    // For platforms with external flash filesystem (like NRF52 with SPI flash), 
-    // show filesystem stats instead of internal flash
     uint32_t flashTotal = 0;
     uint32_t flashUsed = 0;
     uint32_t flashFree = 0;
-    
+
 #ifdef FSCom
-    // Use filesystem stats (external flash where node data is stored)
+    // Get filesystem stats (external flash where node data is stored)
+    // Platform-specific implementation to avoid changing common files
+
+#if defined(ARCH_ESP32) || defined(ARCH_RP2040)
+    // ESP32 and RP2040 have totalBytes()/usedBytes() methods
     flashTotal = FSCom.totalBytes();
     flashUsed = FSCom.usedBytes();
+#elif defined(ARCH_NRF52)
+    // NRF52: Use known flash size from linker symbols
+    // InternalFileSystem uses 7 pages * 4KB = 28KB for internal flash
+    // RAK4631 has external 4MB flash but we show internal for now
+    // TODO: Add external flash filesystem support
+    flashTotal = 1024 * 1024;  // 1MB internal flash
+    flashUsed = MemoryStats::getFlashUsed();  // Firmware size
+#else
+    // Other platforms: use internal flash stats as fallback
+    flashTotal = MemoryStats::getFlashTotal();
+    flashUsed = MemoryStats::getFlashUsed();
+#endif
+
     flashFree = (flashTotal > flashUsed) ? (flashTotal - flashUsed) : 0;
 #else
-    // Fallback to internal flash stats (for platforms without external filesystem)
+    // Fallback to internal flash stats if no filesystem
     flashTotal = MemoryStats::getFlashTotal();
     flashUsed = MemoryStats::getFlashUsed();
     flashFree = MemoryStats::getFlashFree();
 #endif
-    
+
     uint32_t heapTotal = MemoryStats::getHeapTotal();
     uint32_t heapFree = MemoryStats::getHeapFree();
 

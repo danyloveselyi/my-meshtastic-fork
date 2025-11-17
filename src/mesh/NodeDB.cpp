@@ -1329,37 +1329,8 @@ bool NodeDB::saveDeviceStateToDisk()
 #ifdef FSCom
     spiLock->lock();
     FSCom.mkdir("/prefs");
-
-    // Check actual file size and log flash storage info for large databases
-    size_t actualFileSize = 0;
-    auto f = FSCom.open(deviceStateFileName, FILE_O_READ);
-    if (f) {
-        actualFileSize = f.size();
-        f.close();
-    }
-    
-    // Calculate actual encoded protobuf size for accurate estimation
-    size_t encodedSize = 0;
-    pb_get_encoded_size(&encodedSize, meshtastic_DeviceState_fields, &devicestate);
-    
-    // Log if file is large (>50KB) or if we expect a large encoded size
-    if (actualFileSize > 50000 || encodedSize > 50000) {
-        size_t totalBytes = FSCom.totalBytes();
-        size_t usedBytes = FSCom.usedBytes();
-        if (actualFileSize > 0) {
-            LOG_INFO("Flash storage: %u/%u bytes used (%u free, DeviceState file: %u bytes, encoded: %u bytes)",
-                     usedBytes, totalBytes, totalBytes - usedBytes, actualFileSize, encodedSize);
-        } else {
-            LOG_INFO("Flash storage: %u/%u bytes used (%u free, encoded DeviceState: %u bytes)",
-                     usedBytes, totalBytes, totalBytes - usedBytes, encodedSize);
-        }
-    }
-
     spiLock->unlock();
 #endif
-    // Note: Protobuf encoding is much more compact than in-memory structures
-    // Large node databases can still be 50-100KB when encoded
-    // Because so huge we _must_ not use fullAtomic, because the filesystem is probably too small to hold two copies of this
     return saveProto(deviceStateFileName, meshtastic_DeviceState_size, &meshtastic_DeviceState_msg, &devicestate, false);
 }bool NodeDB::saveNodeDatabaseToDisk()
 {
