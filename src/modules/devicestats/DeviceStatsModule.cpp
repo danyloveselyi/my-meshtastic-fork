@@ -325,6 +325,18 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
         logCommand("debug");
         formatDebugInfo(commandBuffer, sizeof(commandBuffer));
         replyText = commandBuffer;
+    } else if (isCommand && (commandEquals(trimmed, "save") || commandEquals(trimmed, "savedb"))) {
+        // Manually force database save to disk
+        logCommand("save");
+        if (nodeDB) {
+            nodeDB->saveToDisk();
+            snprintf(replyBuffer, sizeof(replyBuffer),
+                "💾 Saved %d nodes to disk. Free heap: %u bytes",
+                nodeDB->getNumMeshNodes(), memGet.getFreeHeap());
+        } else {
+            snprintf(replyBuffer, sizeof(replyBuffer), "❌ Error: NodeDB not available");
+        }
+        replyText = replyBuffer;
     } else if (isCommand && (commandEquals(trimmed, "mon start") || commandEquals(trimmed, "monstart"))) {
         // Start interactive setup for monitoring interval
         waitingMonStartNodeId = original.from;

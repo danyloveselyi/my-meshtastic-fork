@@ -1341,7 +1341,79 @@ bool NodeDB::saveDeviceStateToDisk()
 #endif
     size_t nodeDatabaseSize;
     pb_get_encoded_size(&nodeDatabaseSize, meshtastic_NodeDatabase_fields, &nodeDatabase);
-    return saveProto(nodeDatabaseFileName, nodeDatabaseSize, &meshtastic_NodeDatabase_msg, &nodeDatabase, false);
+    
+    // Log database size for monitoring large node databases
+    if (nodeDatabaseSize > 50000 || numMeshNodes > 100) {
+        LOG_INFO("Saving NodeDB: %d nodes, %u bytes encoded, free heap: %u bytes", 
+                 numMeshNodes, nodeDatabaseSize, memGet.getFreeHeap());
+    }
+    
+    bool saveResult = saveProto(nodeDatabaseFileName, nodeDatabaseSize, &meshtastic_NodeDatabase_msg, &nodeDatabase, false);
+    
+    // After save, verify by reading back from flash and logging all nodes
+    if (saveResult && (nodeDatabaseSize > 50000 || numMeshNodes > 100)) {
+        verifyNodeDatabaseFromDisk();
+    }
+    
+    return saveResult;
+}
+
+// Verify saved database by reading from disk and logging all nodes
+void NodeDB::verifyNodeDatabaseFromDisk()
+{
+#ifdef FSCom
+    concurrency::LockGuard g(spiLock);
+    
+    auto f = FSCom.open(nodeDatabaseFileName, FILE_O_READ);
+    if (!f) {
+        LOG_ERROR("Failed to open %s for verification", nodeDatabaseFileName);
+        return;
+    }
+    
+    size_t fileSize = f.size();
+    LOG_INFO("Verifying NodeDB from flash: file size = %u bytes", fileSize);
+    
+    // Read and decode the database from flash
+    meshtastic_NodeDatabase verifyDb = meshtastic_NodeDatabase_init_zero;
+    pb_istream_t stream = {&readcb, &f, fileSize};
+    
+    if (!pb_decode(&stream, &meshtastic_NodeDatabase_msg, &verifyDb)) {
+        LOG_ERROR("Failed to decode NodeDB from flash: %s", PB_GET_ERROR(&stream));
+        f.close();
+        return;
+    }
+    
+    f.close();
+    
+    // Count valid nodes in saved database
+    int validNodes = 0;
+    for (size_t i = 0; i < verifyDb.nodes.size(); i++) {
+        if (verifyDb.nodes[i].has_user && verifyDb.nodes[i].num != 0) {
+            validNodes++;
+        }
+    }
+    
+    LOG_INFO("✓ NodeDB verified from flash: %d valid nodes out of %d total", 
+             validNodes, verifyDb.nodes.size());
+    
+    // Log first 20 nodes as sample (to avoid flooding logs with 500 nodes)
+    LOG_INFO("Sample of saved nodes (first 20):");
+    int logged = 0;
+    for (size_t i = 0; i < verifyDb.nodes.size() && logged < 20; i++) {
+        if (verifyDb.nodes[i].has_user && verifyDb.nodes[i].num != 0) {
+            LOG_INFO("  Node[%d]: 0x%08x %s/%s", 
+                     logged + 1,
+                     verifyDb.nodes[i].num,
+                     verifyDb.nodes[i].user.long_name,
+                     verifyDb.nodes[i].user.short_name);
+            logged++;
+        }
+    }
+    
+    if (validNodes > 20) {
+        LOG_INFO("  ... and %d more nodes", validNodes - 20);
+    }
+#endif
 }
 
 bool NodeDB::saveToDiskNoRetry(int saveWhat)
