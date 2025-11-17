@@ -33,6 +33,12 @@
 #include "mesh/generated/meshtastic/config.pb.h"
 #include "meshUtils.h"
 #include "modules/Modules.h"
+#if !MESHTASTIC_EXCLUDE_TEXTMESSAGE
+#include "modules/TextMessageModule.h"
+#endif
+#if !MESHTASTIC_EXCLUDE_DEVICESTATS
+#include "modules/devicestats/DeviceStatsModule.h"
+#endif
 #include "shutdown.h"
 #include "sleep.h"
 #include "target_specific.h"
@@ -1405,6 +1411,12 @@ void loop()
 
     service->loop();
 
+#if !MESHTASTIC_EXCLUDE_DEVICESTATS
+    // Handle periodic device statistics monitoring
+    if (deviceStatsModule) {
+        deviceStatsModule->doPeriodicWork();
+    }
+#endif
     long delayMsec = mainController.runOrDelay();
 
     // We want to sleep as long as possible here - because it saves power
