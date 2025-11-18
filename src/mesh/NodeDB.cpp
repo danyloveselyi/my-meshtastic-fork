@@ -163,6 +163,12 @@ bool meshtastic_NodeDatabase_callback(pb_istream_t *istream, pb_ostream_t *ostre
         meshtastic_NodeInfoLite node; // this gets good data
         std::vector<meshtastic_NodeInfoLite> *vec = (std::vector<meshtastic_NodeInfoLite> *)field->pData;
 
+        // CRITICAL FIX: Reserve capacity on first node to avoid multiple reallocations
+        // Each push_back() without capacity causes reallocation = double RAM usage temporarily
+        if (vec->empty() && vec->capacity() < MAX_NUM_NODES) {
+            vec->reserve(MAX_NUM_NODES);
+        }
+
         if (istream->bytes_left && pb_decode(istream, meshtastic_NodeInfoLite_fields, &node))
             vec->push_back(node);
     }
@@ -1133,20 +1139,6 @@ void NodeDB::loadFromDisk()
     if (numMeshNodes > MAX_NUM_NODES) {
         LOG_WARN("Node count %d exceeds MAX_NUM_NODES %d, truncating", numMeshNodes, MAX_NUM_NODES);
         numMeshNodes = MAX_NUM_NODES;
-    }
-
-    // CRITICAL FIX: Don't pre-allocate 500 nodes (125KB RAM!)
-    // Only reserve capacity to avoid reallocations, but don't initialize elements
-    // This saves ~125KB RAM on devices with 248KB total RAM
-    if (meshNodes->capacity() < MAX_NUM_NODES) {
-        uint32_t freeBefore = memGet.getFreeHeap();
-        size_t sizeBefore = meshNodes->size();
-        LOG_INFO("Reserving NodeDB capacity from %d to %d nodes. Free heap before: %u bytes",
-                 sizeBefore, MAX_NUM_NODES, freeBefore);
-        meshNodes->reserve(MAX_NUM_NODES);
-        uint32_t freeAfter = memGet.getFreeHeap();
-        LOG_INFO("NodeDB capacity reserved. Free heap after: %u bytes (delta: %d bytes)",
-                 freeAfter, (int32_t)freeAfter - (int32_t)freeBefore);
     }
 
     // static DeviceState scratch; We no longer read into a tempbuf because this structure is 15KB of valuable RAM
