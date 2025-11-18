@@ -84,43 +84,12 @@ static void formatBytesHuman(uint32_t bytes, char* out, size_t outSize)
     }
 
     out[0] = '\0';
-    const uint32_t bytesPerMB = 1024u * 1024u;
-    uint32_t megabytes = bytes / bytesPerMB;
-    uint32_t remainder = bytes % bytesPerMB;
-    uint32_t kilobytes = remainder / 1024u;
-    uint32_t finalBytes = remainder % 1024u;
 
-    size_t offset = 0;
-    auto appendComponent = [&](const char* fmt, uint32_t value) {
-        if (offset >= outSize) {
-            return false;
-        }
-        int written = snprintf(out + offset, outSize - offset, fmt, value);
-        if (written < 0 || static_cast<size_t>(written) >= outSize - offset) {
-            out[outSize - 1] = '\0';
-            offset = outSize;
-            return false;
-        }
-        offset += static_cast<size_t>(written);
-        return true;
-    };
+    // Always format as KB with 3 decimal places for consistency
+    // Example: 28455 bytes = 27.788KB
+    float kilobytes = bytes / 1024.0f;
 
-    bool appended = false;
-    if (megabytes > 0) {
-        if (!appendComponent("%uMB", megabytes)) {
-            return;
-        }
-        appended = true;
-    }
-    if (kilobytes > 0) {
-        if (!appendComponent(appended ? " %uKB" : "%uKB", kilobytes)) {
-            return;
-        }
-        appended = true;
-    }
-    if (finalBytes > 0 || !appended) {
-        appendComponent(appended ? " %uB" : "%uB", finalBytes);
-    }
+    snprintf(out, outSize, "%.3fKB", kilobytes);
 }
 
 // dynamic_max_nodes defined in DynamicNodes.cpp with weak linkage
@@ -915,23 +884,18 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     flashTotal = FSCom.totalBytes();
     flashUsed = FSCom.usedBytes();
 #elif defined(ARCH_NRF52)
-    // NRF52: Calculate total flash usage (firmware + filesystem)
-    // InternalFileSystem: 7 pages * 4KB = 28KB for filesystem
-    flashTotal = 1024 * 1024;  // 1MB internal flash
-    
-    uint32_t firmwareSize = MemoryStats::getFlashUsed();  // Firmware size
-    
-    // Calculate filesystem usage by summing all files
-    uint32_t filesystemSize = 0;
-    {
-        concurrency::LockGuard g(spiLock);
-        std::vector<meshtastic_FileInfo> files = getFiles("/", 10);
-        for (const auto& file : files) {
-            filesystemSize += file.size_bytes;
-        }
+    // NRF52: Calculate filesystem usage by summing all files
+    // InternalFileSystem allocates ~28KB (7 pages * 4KB) from 1MB flash
+    // We show filesystem stats (what user cares about) not total flash
+
+    flashTotal = 28 * 1024;  // LittleFS area size
+    flashUsed = 0;
+
+    // Sum all files in filesystem (recursive, all directories)
+    std::vector<meshtastic_FileInfo> files = getFiles("/", 10);
+    for (const auto& file : files) {
+        flashUsed += file.size_bytes;
     }
-    
-    flashUsed = firmwareSize + filesystemSize;  // Total used = firmware + files
 #else
     // Other platforms: use internal flash stats as fallback
     flashTotal = MemoryStats::getFlashTotal();
