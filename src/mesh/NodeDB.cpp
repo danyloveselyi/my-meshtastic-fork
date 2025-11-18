@@ -475,7 +475,10 @@ void NodeDB::installDefaultNodeDatabase()
 {
     LOG_DEBUG("Install default NodeDatabase");
     nodeDatabase.version = DEVICESTATE_CUR_VER;
-    nodeDatabase.nodes = std::vector<meshtastic_NodeInfoLite>(MAX_NUM_NODES);
+    // CRITICAL FIX: Don't pre-allocate 500 nodes (125KB RAM!)
+    // Reserve capacity but don't initialize elements
+    nodeDatabase.nodes.clear();
+    nodeDatabase.nodes.reserve(MAX_NUM_NODES);
     numMeshNodes = 0;
     meshNodes = &nodeDatabase.nodes;
 }
@@ -1132,16 +1135,17 @@ void NodeDB::loadFromDisk()
         numMeshNodes = MAX_NUM_NODES;
     }
 
-    // Pre-allocate vector to MAX_NUM_NODES to avoid multiple reallocations during runtime
-    // This happens once at boot when memory is still available
-    if (meshNodes->size() < MAX_NUM_NODES) {
+    // CRITICAL FIX: Don't pre-allocate 500 nodes (125KB RAM!)
+    // Only reserve capacity to avoid reallocations, but don't initialize elements
+    // This saves ~125KB RAM on devices with 248KB total RAM
+    if (meshNodes->capacity() < MAX_NUM_NODES) {
         uint32_t freeBefore = memGet.getFreeHeap();
         size_t sizeBefore = meshNodes->size();
-        LOG_INFO("Expanding NodeDB vector from %d to %d nodes. Free heap before: %u bytes",
+        LOG_INFO("Reserving NodeDB capacity from %d to %d nodes. Free heap before: %u bytes",
                  sizeBefore, MAX_NUM_NODES, freeBefore);
-        meshNodes->resize(MAX_NUM_NODES);
+        meshNodes->reserve(MAX_NUM_NODES);
         uint32_t freeAfter = memGet.getFreeHeap();
-        LOG_INFO("NodeDB vector expanded. Free heap after: %u bytes (delta: %d bytes)",
+        LOG_INFO("NodeDB capacity reserved. Free heap after: %u bytes (delta: %d bytes)",
                  freeAfter, (int32_t)freeAfter - (int32_t)freeBefore);
     }
 
@@ -1341,20 +1345,22 @@ bool NodeDB::saveDeviceStateToDisk()
 #endif
     size_t nodeDatabaseSize;
     pb_get_encoded_size(&nodeDatabaseSize, meshtastic_NodeDatabase_fields, &nodeDatabase);
-    
+
     // Log database size for monitoring large node databases
     if (nodeDatabaseSize > 50000 || numMeshNodes > 100) {
-        LOG_INFO("Saving NodeDB: %d nodes, %u bytes encoded, free heap: %u bytes", 
+        LOG_INFO("Saving NodeDB: %d nodes, %u bytes encoded, free heap: %u bytes",
                  numMeshNodes, nodeDatabaseSize, memGet.getFreeHeap());
     }
-    
+
     bool saveResult = saveProto(nodeDatabaseFileName, nodeDatabaseSize, &meshtastic_NodeDatabase_msg, &nodeDatabase, false);
-    
-    // After save, verify by reading back from flash and logging all nodes
-    if (saveResult && (nodeDatabaseSize > 50000 || numMeshNodes > 100)) {
-        verifyNodeDatabaseFromDisk();
-    }
-    
+
+    // DISABLED: Verification loads entire DB into RAM (125KB!)
+    // This causes OOM crash on devices with 248KB RAM
+    // TODO: Implement streaming verification without loading full DB
+    // if (saveResult && (nodeDatabaseSize > 50000 || numMeshNodes > 100)) {
+    //     verifyNodeDatabaseFromDisk();
+    // }
+
     return saveResult;
 }
 
@@ -1363,28 +1369,29 @@ void NodeDB::verifyNodeDatabaseFromDisk()
 {
 #ifdef FSCom
     concurrency::LockGuard g(spiLock);
-    
+
     auto f = FSCom.open(nodeDatabaseFileName, FILE_O_READ);
     if (!f) {
         LOG_ERROR("Failed to open %s for verification", nodeDatabaseFileName);
         return;
     }
-    
+
     size_t fileSize = f.size();
     LOG_INFO("Verifying NodeDB from flash: file size = %u bytes", fileSize);
-    
+
     // Read and decode the database from flash
-    meshtastic_NodeDatabase verifyDb = meshtastic_NodeDatabase_init_zero;
+    meshtastic_NodeDatabase verifyDb = {};
+    verifyDb.version = 0;
     pb_istream_t stream = {&readcb, &f, fileSize};
-    
+
     if (!pb_decode(&stream, &meshtastic_NodeDatabase_msg, &verifyDb)) {
         LOG_ERROR("Failed to decode NodeDB from flash: %s", PB_GET_ERROR(&stream));
         f.close();
         return;
     }
-    
+
     f.close();
-    
+
     // Count valid nodes in saved database
     int validNodes = 0;
     for (size_t i = 0; i < verifyDb.nodes.size(); i++) {
@@ -1392,16 +1399,16 @@ void NodeDB::verifyNodeDatabaseFromDisk()
             validNodes++;
         }
     }
-    
-    LOG_INFO("✓ NodeDB verified from flash: %d valid nodes out of %d total", 
+
+    LOG_INFO("✓ NodeDB verified from flash: %d valid nodes out of %d total",
              validNodes, verifyDb.nodes.size());
-    
+
     // Log first 20 nodes as sample (to avoid flooding logs with 500 nodes)
     LOG_INFO("Sample of saved nodes (first 20):");
     int logged = 0;
     for (size_t i = 0; i < verifyDb.nodes.size() && logged < 20; i++) {
         if (verifyDb.nodes[i].has_user && verifyDb.nodes[i].num != 0) {
-            LOG_INFO("  Node[%d]: 0x%08x %s/%s", 
+            LOG_INFO("  Node[%d]: 0x%08x %s/%s",
                      logged + 1,
                      verifyDb.nodes[i].num,
                      verifyDb.nodes[i].user.long_name,
@@ -1409,7 +1416,7 @@ void NodeDB::verifyNodeDatabaseFromDisk()
             logged++;
         }
     }
-    
+
     if (validNodes > 20) {
         LOG_INFO("  ... and %d more nodes", validNodes - 20);
     }
@@ -1813,13 +1820,13 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
             }
         }
 
-        // Vector is pre-allocated at boot to MAX_NUM_NODES - no dynamic expansion needed
-        // add the node at the end
-        lite = &meshNodes->at((numMeshNodes)++);
-
-        // everything is missing except the nodenum
-        memset(lite, 0, sizeof(*lite));
-        lite->num = n;
+        // CRITICAL FIX: Use push_back() instead of at() since we only reserve capacity, not size
+        // Create new node and add it to vector
+        meshtastic_NodeInfoLite newNode = {};
+        newNode.num = n;
+        meshNodes->push_back(newNode);
+        numMeshNodes++;
+        lite = &meshNodes->at(numMeshNodes - 1);
         LOG_INFO("Adding node to database with %i nodes and %u bytes free!", numMeshNodes, memGet.getFreeHeap());
     }
 

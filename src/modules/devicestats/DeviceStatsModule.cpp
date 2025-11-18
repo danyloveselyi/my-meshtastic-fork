@@ -915,12 +915,23 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     flashTotal = FSCom.totalBytes();
     flashUsed = FSCom.usedBytes();
 #elif defined(ARCH_NRF52)
-    // NRF52: Use known flash size from linker symbols
-    // InternalFileSystem uses 7 pages * 4KB = 28KB for internal flash
-    // RAK4631 has external 4MB flash but we show internal for now
-    // TODO: Add external flash filesystem support
+    // NRF52: Calculate total flash usage (firmware + filesystem)
+    // InternalFileSystem: 7 pages * 4KB = 28KB for filesystem
     flashTotal = 1024 * 1024;  // 1MB internal flash
-    flashUsed = MemoryStats::getFlashUsed();  // Firmware size
+    
+    uint32_t firmwareSize = MemoryStats::getFlashUsed();  // Firmware size
+    
+    // Calculate filesystem usage by summing all files
+    uint32_t filesystemSize = 0;
+    {
+        concurrency::LockGuard g(spiLock);
+        std::vector<meshtastic_FileInfo> files = getFiles("/", 10);
+        for (const auto& file : files) {
+            filesystemSize += file.size_bytes;
+        }
+    }
+    
+    flashUsed = firmwareSize + filesystemSize;  // Total used = firmware + files
 #else
     // Other platforms: use internal flash stats as fallback
     flashTotal = MemoryStats::getFlashTotal();
@@ -984,31 +995,25 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     formatBytesHuman(heapTotal, heapTotalStr, sizeof(heapTotalStr));
     formatBytesHuman(heapFree, heapFreeStr, sizeof(heapFreeStr));
 
-    // Format detailed memory report (optimized - no duplication)
+    // Format detailed memory report (simplified to <200 chars)
     int result;
     if (memValid) {
         if (freeSlots >= 0) {
             result = snprintf(buffer, bufferSize,
-                "📊 MEM\n"
-                "Flash: %s/%s (free: %s)\n"
-                "Heap: %s/%s (free: %s)\n"
-                "Online: %u | Stored: %u/%u (free:%d)\n"
-                "Q: %u Pool: ~22",
+                "📊 Memory\n"
+                "Flash: %s/%s (free:%s) | Heap: %s/%s (free:%s)\n"
+                "Nodes: %u online, %u/%u stored (%d free)",
                 flashUsedStr, flashTotalStr, flashFreeStr,
                 heapUsedStr, heapTotalStr, heapFreeStr,
-                onlineNodes, storedNodes, maxNodes, freeSlots,
-                MAX_RX_TOPHONE);
+                onlineNodes, storedNodes, maxNodes, freeSlots);
         } else {
             result = snprintf(buffer, bufferSize,
-                "📊 MEM\n"
-                "Flash: %s/%s (free: %s)\n"
-                "Heap: %s/%s (free: %s)\n"
-                "Online: %u | Stored: %u/%u (OVER:%d)\n"
-                "Q: %u Pool: ~22",
+                "📊 Memory\n"
+                "Flash: %s/%s (free:%s) | Heap: %s/%s (free:%s)\n"
+                "Nodes: %u online, %u/%u stored (OVER %d)",
                 flashUsedStr, flashTotalStr, flashFreeStr,
                 heapUsedStr, heapTotalStr, heapFreeStr,
-                onlineNodes, storedNodes, maxNodes, -freeSlots,
-                MAX_RX_TOPHONE);
+                onlineNodes, storedNodes, maxNodes, -freeSlots);
         }
     } else {
         // Fallback if memory stats are invalid
