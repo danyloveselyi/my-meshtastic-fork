@@ -887,8 +887,12 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     // NRF52: Calculate filesystem usage by summing all files
     // InternalFileSystem allocates ~28KB (7 pages * 4KB) from 1MB flash
     // We show filesystem stats (what user cares about) not total flash
-
+#ifdef RAK_4631_LITE_EXTENDED_FILESYSTEM
+    // Extended filesystem for RAK4631 Lite variant: 80 pages (320 KB)
+    flashTotal = 80 * 4096;  // LittleFS area size (80 pages * 4KB = 327680 bytes = 320 KB)
+#else
     flashTotal = 28 * 1024;  // LittleFS area size
+#endif
     flashUsed = 0;
 
     // Sum all files in filesystem (recursive, all directories)

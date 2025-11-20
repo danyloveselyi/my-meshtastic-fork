@@ -13,6 +13,7 @@
   },
   "files.associations": {
     "atomic": "cpp",
-    "vector": "cpp"
+    "vector": "cpp",
+    "cstdio": "cpp"
   }
 }

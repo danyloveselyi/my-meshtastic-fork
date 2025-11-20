@@ -1753,7 +1753,7 @@ meshtastic_NodeInfoLite *NodeDB::getMeshNode(NodeNum n)
 }
 
 // returns true if we are running low on memory
-// Note: Node count limit is checked separately in getOrCreateMeshNode() using dynamic_max_nodes
+// Note: Node count limit is checked separately in getOrCreateMeshNode() using MAX_NUM_NODES
 bool NodeDB::isFull()
 {
     return (memGet.getFreeHeap() < MINIMUM_SAFE_FREE_HEAP);

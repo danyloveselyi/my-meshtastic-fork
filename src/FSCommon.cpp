@@ -293,6 +293,14 @@ void fsInit()
         LOG_ERROR("Filesystem mount failed");
         // assert(0); This auto-formats the partition, so no need to fail here.
     }
+#if defined(ARCH_NRF52) && defined(RAK_4631_LITE_EXTENDED_FILESYSTEM)
+    // Extended filesystem fallback logic for RAK4631 Lite variant
+    // This is handled by variants/rak4631_lite/FSCommon-fallback.cpp
+    extern void fsInitExtended();
+    fsInitExtended();
+#elif defined(ARCH_NRF52)
+    // Standard NRF52: no extended filesystem support
+#endif
 #if defined(ARCH_ESP32)
     LOG_DEBUG("Filesystem files (%d/%d Bytes):", FSCom.usedBytes(), FSCom.totalBytes());
 #else
