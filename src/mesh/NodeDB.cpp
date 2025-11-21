@@ -172,10 +172,29 @@ bool meshtastic_NodeDatabase_callback(pb_istream_t *istream, pb_ostream_t *ostre
         meshtastic_NodeInfoLite node; // this gets good data
         std::vector<meshtastic_NodeInfoLite> *vec = (std::vector<meshtastic_NodeInfoLite> *)field->pData;
 
-        // CRITICAL FIX: Reserve capacity on first node to avoid multiple reallocations
+        // CRITICAL FIX: Reserve capacity to avoid multiple reallocations during loading
         // Each push_back() without capacity causes reallocation = double RAM usage temporarily
+        // Check capacity on first node (when vector is empty) to ensure one-time allocation
         if (vec->empty() && vec->capacity() < MAX_NUM_NODES) {
             vec->reserve(MAX_NUM_NODES);
+            size_t capacity = vec->capacity();
+            if (capacity < MAX_NUM_NODES) {
+                LOG_ERROR("CRITICAL: Failed to reserve memory during load! Capacity: %u (expected: %u)", 
+                          capacity, MAX_NUM_NODES);
+                LOG_ERROR("Free heap: %u bytes. Loading may fail or cause memory issues!", memGet.getFreeHeap());
+            } else {
+                LOG_DEBUG("Reserved memory for %u nodes during load (capacity: %u)", MAX_NUM_NODES, capacity);
+            }
+        }
+        // Also check capacity if vector is not empty (shouldn't happen, but safety check)
+        else if (!vec->empty() && vec->capacity() < MAX_NUM_NODES) {
+            LOG_WARN("Vector not empty but capacity (%u) < MAX_NUM_NODES (%u) - attempting reserve", 
+                     vec->capacity(), MAX_NUM_NODES);
+            vec->reserve(MAX_NUM_NODES);
+            size_t capacity = vec->capacity();
+            if (capacity < MAX_NUM_NODES) {
+                LOG_ERROR("Failed to reserve additional memory! Capacity: %u (expected: %u)", capacity, MAX_NUM_NODES);
+            }
         }
 
         if (istream->bytes_left && pb_decode(istream, meshtastic_NodeInfoLite_fields, &node))
@@ -494,8 +513,23 @@ void NodeDB::installDefaultNodeDatabase()
     // CRITICAL FIX: Don't pre-allocate 500 nodes (125KB RAM!)
     // Reserve capacity but don't initialize elements
     nodeDatabase.nodes.clear();
+    
+    // Reserve memory for MAX_NUM_NODES nodes (one-time allocation)
+    // This ensures we have enough capacity for all nodes without reallocations
     nodeDatabase.nodes.reserve(MAX_NUM_NODES);
-    LOG_INFO("NodeDB initialized: MAX_NUM_NODES = %u", MAX_NUM_NODES);
+    
+    // Verify that reserve() succeeded
+    size_t capacity = nodeDatabase.nodes.capacity();
+    if (capacity < MAX_NUM_NODES) {
+        LOG_ERROR("CRITICAL: Failed to reserve memory for %u nodes! Capacity: %u bytes (expected: %u bytes)", 
+                  MAX_NUM_NODES, capacity, MAX_NUM_NODES);
+        LOG_ERROR("Free heap: %u bytes. This may cause memory issues during node addition!", memGet.getFreeHeap());
+        // Continue anyway - system may still work with reduced capacity, but log error
+    } else {
+        LOG_DEBUG("Successfully reserved memory for %u nodes (capacity: %u)", MAX_NUM_NODES, capacity);
+    }
+    
+    LOG_INFO("NodeDB initialized: MAX_NUM_NODES = %u, capacity = %u", MAX_NUM_NODES, capacity);
     numMeshNodes = 0;
     meshNodes = &nodeDatabase.nodes;
 }
@@ -963,6 +997,15 @@ void NodeDB::resetNodes()
     if (!config.position.fixed_position)
         clearLocalPosition();
     numMeshNodes = 1;
+    
+    // Ensure capacity is sufficient before using std::fill()
+    // This should already be set by installDefaultNodeDatabase(), but verify for safety
+    if (nodeDatabase.nodes.capacity() < MAX_NUM_NODES) {
+        LOG_WARN("NodeDB capacity (%u) < MAX_NUM_NODES (%u) in resetNodes() - reserving memory", 
+                 nodeDatabase.nodes.capacity(), MAX_NUM_NODES);
+        nodeDatabase.nodes.reserve(MAX_NUM_NODES);
+    }
+    
     std::fill(nodeDatabase.nodes.begin() + 1, nodeDatabase.nodes.end(), meshtastic_NodeInfoLite());
     devicestate.has_rx_text_message = false;
     devicestate.has_rx_waypoint = false;
@@ -1313,6 +1356,26 @@ void NodeDB::loadFromDisk()
         meshNodes = &nodeDatabase.nodes;
         numMeshNodes = nodeDatabase.nodes.size();
         LOG_INFO("Loaded saved nodedatabase version %d, with nodes count: %d", nodeDatabase.version, nodeDatabase.nodes.size());
+        
+        // CRITICAL: Verify capacity after loading - ensure we have enough space for MAX_NUM_NODES
+        // This is important because reserve() might not have been called during load (if vector wasn't empty)
+        size_t capacity = nodeDatabase.nodes.capacity();
+        if (capacity < MAX_NUM_NODES) {
+            LOG_WARN("NodeDB capacity (%u) < MAX_NUM_NODES (%u) after load - reserving additional memory", 
+                     capacity, MAX_NUM_NODES);
+            nodeDatabase.nodes.reserve(MAX_NUM_NODES);
+            capacity = nodeDatabase.nodes.capacity();
+            if (capacity < MAX_NUM_NODES) {
+                LOG_ERROR("CRITICAL: Failed to reserve memory after load! Capacity: %u (expected: %u)", 
+                          capacity, MAX_NUM_NODES);
+                LOG_ERROR("Free heap: %u bytes. Adding new nodes may fail!", memGet.getFreeHeap());
+            } else {
+                LOG_DEBUG("Successfully reserved memory after load (capacity: %u)", capacity);
+            }
+        } else {
+            LOG_DEBUG("NodeDB capacity verified after load: %u (sufficient for MAX_NUM_NODES: %u)", 
+                     capacity, MAX_NUM_NODES);
+        }
     }
 
     if (numMeshNodes > MAX_NUM_NODES) {
@@ -2468,12 +2531,33 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
             return nullptr;
         }
         
+        // CRITICAL: Verify capacity before push_back() to prevent reallocation
+        // Reallocation would temporarily double RAM usage and could cause OOM
+        size_t capacity = meshNodes->capacity();
+        size_t current_size = meshNodes->size();
+        if (capacity < (current_size + 1)) {
+            LOG_ERROR("CRITICAL: Vector capacity (%u) insufficient for push_back()! Current size: %u, needed: %u", 
+                     capacity, current_size, current_size + 1);
+            LOG_ERROR("Free heap: %u bytes. Attempting emergency reserve...", memGet.getFreeHeap());
+            // Emergency reserve - try to reserve at least MAX_NUM_NODES
+            meshNodes->reserve(MAX_NUM_NODES);
+            capacity = meshNodes->capacity();
+            if (capacity < (current_size + 1)) {
+                LOG_ERROR("Emergency reserve failed! Capacity: %u, needed: %u. Cannot add node!", 
+                         capacity, current_size + 1);
+                return nullptr; // Cannot add node - memory allocation failed
+            } else {
+                LOG_WARN("Emergency reserve succeeded (capacity: %u), but this should not happen!", capacity);
+            }
+        }
+        
         meshtastic_NodeInfoLite newNode = {};
         newNode.num = n;
         meshNodes->push_back(newNode);
         numMeshNodes++;
         lite = &meshNodes->at(numMeshNodes - 1);
-        LOG_INFO("Adding node to database with %i nodes and %u bytes free!", numMeshNodes, memGet.getFreeHeap());
+        LOG_INFO("Adding node to database with %i nodes and %u bytes free! (capacity: %u)", 
+                numMeshNodes, memGet.getFreeHeap(), meshNodes->capacity());
     }
 
     return lite;
