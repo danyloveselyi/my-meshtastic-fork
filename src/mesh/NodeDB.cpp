@@ -490,6 +490,7 @@ void NodeDB::installDefaultNodeDatabase()
     // Reserve capacity but don't initialize elements
     nodeDatabase.nodes.clear();
     nodeDatabase.nodes.reserve(MAX_NUM_NODES);
+    LOG_INFO("NodeDB initialized: MAX_NUM_NODES = %u", MAX_NUM_NODES);
     numMeshNodes = 0;
     meshNodes = &nodeDatabase.nodes;
 }
@@ -2336,15 +2337,21 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
         bool reachedNodeLimit = (numMeshNodes >= MAX_NUM_NODES);
         bool lowMemory = isFull();
 
-        if (reachedNodeLimit || lowMemory) {
-            if (reachedNodeLimit) {
-                LOG_INFO("Node database full: %u/%u nodes", numMeshNodes, MAX_NUM_NODES);
-            }
-            if (lowMemory) {
-                LOG_WARN("Low memory: %u bytes free (minimum: %u)",
-                         memGet.getFreeHeap(), MINIMUM_SAFE_FREE_HEAP);
-            }
-            LOG_INFO("Erasing oldest entry");
+        // Only evict nodes if we've reached the node limit
+        // Don't evict nodes based on memory alone - just log warning
+        // Memory pressure should be handled by other mechanisms, not by deleting nodes
+        if (reachedNodeLimit) {
+            LOG_INFO("Node database full: %u/%u nodes", numMeshNodes, MAX_NUM_NODES);
+            LOG_INFO("Erasing oldest entry to make room for new node");
+        } else if (lowMemory) {
+            // Only log memory warning, don't evict nodes
+            LOG_WARN("Low memory: %u bytes free (minimum: %u), but node count (%u) is below limit (%u)",
+                     memGet.getFreeHeap(), MINIMUM_SAFE_FREE_HEAP, numMeshNodes, MAX_NUM_NODES);
+            LOG_WARN("Not evicting nodes - memory pressure should be handled by other mechanisms");
+        }
+        
+        // Only proceed with eviction if we've reached the node limit
+        if (reachedNodeLimit) {
             // look for oldest node and erase it
             uint32_t oldest = UINT32_MAX;
             uint32_t oldestBoring = UINT32_MAX;
@@ -2376,11 +2383,35 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                     meshNodes->at(i) = meshNodes->at(i + 1);
                 }
                 (numMeshNodes)--;
+            } else {
+                // CRITICAL FIX: If no node found to evict, try to evict the oldest non-favorite node (index 1, as 0 is our node)
+                // This prevents exceeding MAX_NUM_NODES when all nodes are favorites/ignored/verified
+                if (numMeshNodes > 1 && numMeshNodes >= MAX_NUM_NODES) {
+                    LOG_WARN("No 'boring' node found to evict, forcing eviction of oldest non-favorite node");
+                    oldestIndex = 1;  // Force evict second node (oldest after our node)
+                    for (int i = oldestIndex; i < numMeshNodes - 1; i++) {
+                        meshNodes->at(i) = meshNodes->at(i + 1);
+                    }
+                    (numMeshNodes)--;
+                } else if (numMeshNodes >= MAX_NUM_NODES) {
+                    // CRITICAL: Cannot add new node - database is full and no node can be evicted
+                    LOG_ERROR("Cannot add node %u: database full (%u/%u nodes) and no node can be evicted", n, numMeshNodes, MAX_NUM_NODES);
+                    LOG_ERROR("This may cause memory issues - consider increasing MAX_NUM_NODES or cleaning up nodes");
+                    // Return nullptr to prevent adding node and potential memory issues
+                    return nullptr;
+                }
             }
         }
 
         // CRITICAL FIX: Use push_back() instead of at() since we only reserve capacity, not size
         // Create new node and add it to vector
+        // NOTE: At this point, we should have space (either under limit, or old node was evicted)
+        if (numMeshNodes >= MAX_NUM_NODES) {
+            // This should ideally not be reached if eviction logic is perfect, but as a safeguard
+            LOG_ERROR("Attempting to add node %u when database is full (%u/%u nodes) after eviction attempt. Returning nullptr.", n, numMeshNodes, MAX_NUM_NODES);
+            return nullptr;
+        }
+        
         meshtastic_NodeInfoLite newNode = {};
         newNode.num = n;
         meshNodes->push_back(newNode);
