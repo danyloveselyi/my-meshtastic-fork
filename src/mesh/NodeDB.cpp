@@ -2502,6 +2502,11 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                     meshNodes->at(i) = meshNodes->at(i + 1);
                 }
                 (numMeshNodes)--;
+                // CRITICAL: Synchronize vector size with numMeshNodes after eviction
+                // This prevents size() from being larger than numMeshNodes, which would cause capacity issues
+                meshNodes->resize(numMeshNodes);
+                LOG_DEBUG("Evicted node at index %d, numMeshNodes now: %u, vector size: %u", 
+                         oldestIndex, numMeshNodes, meshNodes->size());
             } else {
                 // CRITICAL FIX: If no node found to evict, try to evict the oldest non-favorite node (index 1, as 0 is our node)
                 // This prevents exceeding MAX_NUM_NODES when all nodes are favorites/ignored/verified
@@ -2512,6 +2517,10 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                         meshNodes->at(i) = meshNodes->at(i + 1);
                     }
                     (numMeshNodes)--;
+                    // CRITICAL: Synchronize vector size with numMeshNodes after eviction
+                    meshNodes->resize(numMeshNodes);
+                    LOG_DEBUG("Force evicted node at index %d, numMeshNodes now: %u, vector size: %u", 
+                             oldestIndex, numMeshNodes, meshNodes->size());
                 } else if (numMeshNodes >= MAX_NUM_NODES) {
                     // CRITICAL: Cannot add new node - database is full and no node can be evicted
                     LOG_ERROR("Cannot add node %u: database full (%u/%u nodes) and no node can be evicted", n, numMeshNodes, MAX_NUM_NODES);
@@ -2533,8 +2542,18 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
         
         // CRITICAL: Verify capacity before push_back() to prevent reallocation
         // Reallocation would temporarily double RAM usage and could cause OOM
+        // Use numMeshNodes instead of size() for reliability (size() may be out of sync after eviction)
         size_t capacity = meshNodes->capacity();
-        size_t current_size = meshNodes->size();
+        size_t current_size = (size_t)numMeshNodes;  // Use numMeshNodes as source of truth
+        size_t vector_size = meshNodes->size();     // For diagnostic purposes
+        
+        // Log warning if size() and numMeshNodes are out of sync (shouldn't happen after fix)
+        if (vector_size != current_size) {
+            LOG_WARN("Vector size (%u) != numMeshNodes (%u) - synchronizing...", vector_size, current_size);
+            meshNodes->resize(current_size);  // Synchronize
+            vector_size = meshNodes->size();
+        }
+        
         if (capacity < (current_size + 1)) {
             LOG_ERROR("CRITICAL: Vector capacity (%u) insufficient for push_back()! Current size: %u, needed: %u", 
                      capacity, current_size, current_size + 1);
