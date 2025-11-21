@@ -151,14 +151,30 @@ inline void reportLittleFSCorruptionOnce()
 #ifndef RAK_4631_LITE_EXTENDED_FILESYSTEM
 void preFSBegin()
 {
+    // БЕЗОПАСНЫЙ СЦЕНАРИЙ: Минимальные операции (только GPREGRET проверка)
+    LOG_INFO("========================================");
+    LOG_INFO("preFSBegin() START - STANDARD (7 pages)");
+    LOG_INFO("========================================");
+    LOG_INFO("Current millis(): %lu", millis());
+    LOG_INFO("Reset reason: 0x%08X", NRF_POWER->RESETREAS);
+    LOG_INFO("GPREGRET: 0x%02X", NRF_POWER->GPREGRET);
+    
     // The GPREGRET register keeps its value across warm boots. Check that this is a warm boot and, if GPREGRET
     // is set to NRF52_MAGIC_LFS_IS_CORRUPT, format LittleFS.
-    if (!(NRF_POWER->RESETREAS == 0 && NRF_POWER->GPREGRET == NRF52_MAGIC_LFS_IS_CORRUPT))
+    if (!(NRF_POWER->RESETREAS == 0 && NRF_POWER->GPREGRET == NRF52_MAGIC_LFS_IS_CORRUPT)) {
+        LOG_INFO("No corruption flag - continuing");
+        LOG_INFO("preFSBegin() END");
+        LOG_INFO("========================================");
         return;
+    }
+    
+    LOG_WARN("GPREGRET corruption flag detected - formatting filesystem");
     NRF_POWER->GPREGRET = 0;
     millis_until_formatting_again = millis() + MULTIPLE_CORRUPTION_DELAY_MILLIS;
     InternalFS.format();
     LOG_INFO("LittleFS format complete; restoring default settings");
+    LOG_INFO("preFSBegin() END");
+    LOG_INFO("========================================");
 }
 #else
 // For RAK4631 Lite variant, preFSBegin() is implemented in variants/rak4631_lite/main-nrf52-filesystem.cpp

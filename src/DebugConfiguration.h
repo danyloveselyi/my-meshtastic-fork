@@ -46,12 +46,18 @@
 #define LOG_TRACE(...) SEGGER_RTT_printf(0, __VA_ARGS__)
 #else
 #if defined(DEBUG_PORT) && !defined(DEBUG_MUTE)
-#define LOG_DEBUG(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_DEBUG, __VA_ARGS__)
-#define LOG_INFO(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_INFO, __VA_ARGS__)
-#define LOG_WARN(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_WARN, __VA_ARGS__)
-#define LOG_ERROR(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_ERROR, __VA_ARGS__)
-#define LOG_CRIT(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_CRIT, __VA_ARGS__)
-#define LOG_TRACE(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_TRACE, __VA_ARGS__)
+  // Disable only DEBUG logs if DISABLE_DEBUG_LOGS_ONLY is defined (keeps INFO/WARN/ERROR)
+  #ifdef DISABLE_DEBUG_LOGS_ONLY
+  #define LOG_DEBUG(...)  // DEBUG logs disabled for performance
+  #else
+  #define LOG_DEBUG(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_DEBUG, __VA_ARGS__)
+  #endif
+  // Always keep INFO, WARN, ERROR, CRIT, TRACE logs enabled
+  #define LOG_INFO(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_INFO, __VA_ARGS__)
+  #define LOG_WARN(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_WARN, __VA_ARGS__)
+  #define LOG_ERROR(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_ERROR, __VA_ARGS__)
+  #define LOG_CRIT(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_CRIT, __VA_ARGS__)
+  #define LOG_TRACE(...) DEBUG_PORT.log(MESHTASTIC_LOG_LEVEL_TRACE, __VA_ARGS__)
 #else
 #define LOG_DEBUG(...)
 #define LOG_INFO(...)

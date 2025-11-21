@@ -963,25 +963,76 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     formatBytesHuman(heapTotal, heapTotalStr, sizeof(heapTotalStr));
     formatBytesHuman(heapFree, heapFreeStr, sizeof(heapFreeStr));
 
-    // Format detailed memory report (simplified to <200 chars)
+    // Get extended filesystem stats for NodeDB (if enabled)
+    uint32_t nodeDBFlashTotal = 0;
+    uint32_t nodeDBFlashUsed = 0;
+    uint32_t nodeDBFlashFree = 0;
+    bool nodeDBFSEnabled = false;
+    
+    #ifdef USE_EXTENDED_FS_FOR_NODEDB
+    extern bool getExtendedFSStats(uint32_t* total, uint32_t* used, uint32_t* free);
+    nodeDBFSEnabled = getExtendedFSStats(&nodeDBFlashTotal, &nodeDBFlashUsed, &nodeDBFlashFree);
+    #endif
+    
+    char nodeDBFlashUsedStr[32] = "0.000KB";
+    char nodeDBFlashTotalStr[32] = "0.000KB";
+    char nodeDBFlashFreeStr[32] = "0.000KB";
+    
+    if (nodeDBFSEnabled) {
+        formatBytesHuman(nodeDBFlashUsed, nodeDBFlashUsedStr, sizeof(nodeDBFlashUsedStr));
+        formatBytesHuman(nodeDBFlashTotal, nodeDBFlashTotalStr, sizeof(nodeDBFlashTotalStr));
+        formatBytesHuman(nodeDBFlashFree, nodeDBFlashFreeStr, sizeof(nodeDBFlashFreeStr));
+    }
+    
+    // Format detailed memory report (simplified to <300 chars)
     int result;
     if (memValid) {
-        if (freeSlots >= 0) {
-            result = snprintf(buffer, bufferSize,
-                "📊 Memory\n"
-                "Flash: %s/%s (free:%s) | Heap: %s/%s (free:%s)\n"
-                "Nodes: %u online, %u/%u stored (%d free)",
-                flashUsedStr, flashTotalStr, flashFreeStr,
-                heapUsedStr, heapTotalStr, heapFreeStr,
-                onlineNodes, storedNodes, maxNodes, freeSlots);
+        if (nodeDBFSEnabled) {
+            // Extended filesystem enabled - show both main FS and NodeDB FS
+            if (freeSlots >= 0) {
+                result = snprintf(buffer, bufferSize,
+                    "📊 Memory\n"
+                    "Flash (config): %s/%s (free:%s)\n"
+                    "Flash (NodeDB): %s/%s (free:%s)\n"
+                    "Heap: %s/%s (free:%s)\n"
+                    "Nodes: %u online, %u/%u stored (%d free)",
+                    flashUsedStr, flashTotalStr, flashFreeStr,
+                    nodeDBFlashUsedStr, nodeDBFlashTotalStr, nodeDBFlashFreeStr,
+                    heapUsedStr, heapTotalStr, heapFreeStr,
+                    onlineNodes, storedNodes, maxNodes, freeSlots);
+            } else {
+                result = snprintf(buffer, bufferSize,
+                    "📊 Memory\n"
+                    "Flash (config): %s/%s (free:%s)\n"
+                    "Flash (NodeDB): %s/%s (free:%s)\n"
+                    "Heap: %s/%s (free:%s)\n"
+                    "Nodes: %u online, %u/%u stored (OVER %d)",
+                    flashUsedStr, flashTotalStr, flashFreeStr,
+                    nodeDBFlashUsedStr, nodeDBFlashTotalStr, nodeDBFlashFreeStr,
+                    heapUsedStr, heapTotalStr, heapFreeStr,
+                    onlineNodes, storedNodes, maxNodes, -freeSlots);
+            }
         } else {
-            result = snprintf(buffer, bufferSize,
-                "📊 Memory\n"
-                "Flash: %s/%s (free:%s) | Heap: %s/%s (free:%s)\n"
-                "Nodes: %u online, %u/%u stored (OVER %d)",
-                flashUsedStr, flashTotalStr, flashFreeStr,
-                heapUsedStr, heapTotalStr, heapFreeStr,
-                onlineNodes, storedNodes, maxNodes, -freeSlots);
+            // Standard filesystem only
+            if (freeSlots >= 0) {
+                result = snprintf(buffer, bufferSize,
+                    "📊 Memory\n"
+                    "Flash: %s/%s (free:%s)\n"
+                    "Heap: %s/%s (free:%s)\n"
+                    "Nodes: %u online, %u/%u stored (%d free)",
+                    flashUsedStr, flashTotalStr, flashFreeStr,
+                    heapUsedStr, heapTotalStr, heapFreeStr,
+                    onlineNodes, storedNodes, maxNodes, freeSlots);
+            } else {
+                result = snprintf(buffer, bufferSize,
+                    "📊 Memory\n"
+                    "Flash: %s/%s (free:%s)\n"
+                    "Heap: %s/%s (free:%s)\n"
+                    "Nodes: %u online, %u/%u stored (OVER %d)",
+                    flashUsedStr, flashTotalStr, flashFreeStr,
+                    heapUsedStr, heapTotalStr, heapFreeStr,
+                    onlineNodes, storedNodes, maxNodes, -freeSlots);
+            }
         }
     } else {
         // Fallback if memory stats are invalid
