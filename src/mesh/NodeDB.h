@@ -206,6 +206,20 @@ class NodeDB
                              void *dest_struct);
     bool saveProto(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
                    bool fullAtomic = true);
+    
+    // Separate methods for different filesystems (public API)
+    bool saveProtoMainFS(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
+                         bool fullAtomic = true);
+    bool saveProtoExtendedFS(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
+                              bool fullAtomic = true);
+    
+    // Internal unified method (private)
+    enum class FilesystemType {
+        MAIN_FS,      // Main filesystem (7 pages, 28 KB) - for config, device, module, channels, uiconfig
+        EXTENDED_FS   // Extended filesystem (80 pages, 320 KB) - for nodes.proto only
+    };
+    bool saveProtoInternal(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
+                           bool fullAtomic, FilesystemType fsType);
 
     void installRoleDefaults(meshtastic_Config_DeviceConfig_Role role);
 

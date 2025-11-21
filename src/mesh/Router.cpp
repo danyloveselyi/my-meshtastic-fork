@@ -357,7 +357,14 @@ DecodeState perhapsDecode(meshtastic_MeshPacket *p)
     if (p->channel == 0 && isToUs(p) && p->to > 0 && !isBroadcast(p->to) && nodeDB->getMeshNode(p->from) != nullptr &&
         nodeDB->getMeshNode(p->from)->user.public_key.size > 0 && nodeDB->getMeshNode(p->to)->user.public_key.size > 0 &&
         rawSize > MESHTASTIC_PKC_OVERHEAD) {
-        LOG_DEBUG("Attempt PKI decryption");
+        // Log which public key we're using for decryption (for debugging)
+        char pubkey_hex[17];
+        for (int i = 0; i < 8; i++) {
+            snprintf(pubkey_hex + i * 2, 3, "%02X", nodeDB->getMeshNode(p->from)->user.public_key.bytes[i]);
+        }
+        pubkey_hex[16] = '\0';
+        LOG_DEBUG("Attempt PKI decryption from node 0x%08x using public key (first 8 bytes: %s...)", 
+                 p->from, pubkey_hex);
 
         if (crypto->decryptCurve25519(p->from, nodeDB->getMeshNode(p->from)->user.public_key, p->id, rawSize, p->encrypted.bytes,
                                       bytes)) {

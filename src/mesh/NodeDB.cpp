@@ -35,6 +35,24 @@
 // Include LittleFS headers for extended filesystem support (if enabled)
 #ifdef USE_EXTENDED_FS_FOR_NODEDB
 #include "../../platform/stm32wl/littlefs/lfs.h"
+
+// Structure to hold LittleFS file context for streaming protobuf encoding
+struct LfsFileContext {
+    lfs_t* lfs;
+    lfs_file_t* file;
+};
+
+// Streaming callback for protobuf encoding to LittleFS file (no buffer allocation needed)
+static bool lfs_writecb(pb_ostream_t *stream, const pb_byte_t *buf, size_t count)
+{
+    LfsFileContext* ctx = (LfsFileContext*)stream->state;
+    if (!ctx || !ctx->lfs || !ctx->file) {
+        return false;
+    }
+    
+    lfs_ssize_t written = lfs_file_write(ctx->lfs, ctx->file, buf, count);
+    return (written == (lfs_ssize_t)count);
+}
 #endif
 
 #ifdef ARCH_ESP32
@@ -1580,13 +1598,11 @@ void NodeDB::loadFromDisk()
 bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
                        bool fullAtomic)
 {
-    bool okay = false;
 #ifdef FSCom
     // Check if this is nodes.proto and if extended filesystem should be used
     #ifdef USE_EXTENDED_FS_FOR_NODEDB
     extern bool useExtendedFSForNodeDB();
     extern bool isNodeDBFile(const char* filename);
-    extern void* getExtendedFSForNodeDB();
     
     // IMPORTANT: Only use extended filesystem for nodes.proto (other nodes from network)
     // All other files (config.proto, device.proto, module.proto, channels.proto, uiconfig.proto)
@@ -1594,253 +1610,235 @@ bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_
     // NO FALLBACK: If extended filesystem fails, nodes.proto simply won't be saved (but system continues)
     if (useExtendedFSForNodeDB() && isNodeDBFile(filename)) {
         // Use extended filesystem for nodes.proto (other nodes from network only)
+        return saveProtoExtendedFS(filename, protoSize, fields, dest_struct, fullAtomic);
+    }
+    #endif // USE_EXTENDED_FS_FOR_NODEDB
+    
+    // Use main filesystem for all other files
+    return saveProtoMainFS(filename, protoSize, fields, dest_struct, fullAtomic);
+#else
+    return false;
+#endif
+}
+
+/** Save to MAIN filesystem (7 pages, 28 KB) - for config, device, module, channels, uiconfig */
+bool NodeDB::saveProtoMainFS(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
+                              bool fullAtomic)
+{
+    return saveProtoInternal(filename, protoSize, fields, dest_struct, fullAtomic, FilesystemType::MAIN_FS);
+}
+
+/** Save to EXTENDED filesystem (80 pages, 320 KB) - for nodes.proto only */
+bool NodeDB::saveProtoExtendedFS(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
+                                  bool fullAtomic)
+{
+    return saveProtoInternal(filename, protoSize, fields, dest_struct, fullAtomic, FilesystemType::EXTENDED_FS);
+}
+
+/** Internal unified method for saving protobuf to either filesystem */
+bool NodeDB::saveProtoInternal(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
+                               bool fullAtomic, FilesystemType fsType)
+{
+    bool okay = false;
+#ifdef FSCom
+    if (fsType == FilesystemType::EXTENDED_FS) {
+        // Use extended filesystem for nodes.proto (other nodes from network only)
         LOG_INFO("Save %s to EXTENDED filesystem (80 pages, 320 KB) - other nodes only", filename);
+        
+        #ifdef USE_EXTENDED_FS_FOR_NODEDB
+        extern void* getExtendedFSForNodeDB();
         
         // Cast to lfs_t* (headers already included at top of file)
         // Get fresh pointer each time in case filesystem was reformatted
         lfs_t* extended_lfs = (lfs_t*)getExtendedFSForNodeDB();
-        if (extended_lfs) {
-            // Reset reformat flag at start of save operation
-            static bool reformat_attempted_this_save = false;
-            if (reformat_attempted_this_save) {
-                reformat_attempted_this_save = false;  // Reset for new save operation
-            }
-            // CRITICAL: Extended filesystem uses SoftDevice API directly, NOT SPI!
-            // Do NOT use writecb here - it uses spiLock for SPI bus (LoRa radio + main filesystem).
-            // Use buffer-based encoding instead: encode to buffer, then write buffer to file.
-            
-            LOG_DEBUG("Opening %s for writing in extended filesystem (buffer-based)...", filename);
-            
-            // Ensure directory exists (e.g., /prefs/ for /prefs/nodes.proto)
-            const char* slash = filename;
-            if (slash[0] == '/') {
-                slash++; // skip root '/'
-            }
-            while (NULL != (slash = strchr(slash, '/'))) {
-                size_t dir_len = slash - filename;
-                char dir_path[64];
-                if (dir_len < sizeof(dir_path)) {
-                    memcpy(dir_path, filename, dir_len);
-                    dir_path[dir_len] = '\0';
-                    int mkdir_result = lfs_mkdir(extended_lfs, dir_path);
-                    if (mkdir_result != LFS_ERR_OK && mkdir_result != LFS_ERR_EXIST) {
-                        LOG_DEBUG("Failed to create directory '%s' in extended FS (error: %d), continuing...", dir_path, mkdir_result);
-                    }
-                }
-                slash++; // move past '/'
-            }
-            
-            // Remove old file first (for atomic write)
-            // This is safer than truncate - avoids issues with block allocation
-            int remove_result = lfs_remove(extended_lfs, filename);
-            if (remove_result == LFS_ERR_OK) {
-                LOG_DEBUG("Removed old file '%s' before write", filename);
-            } else if (remove_result != LFS_ERR_NOENT) {
-                LOG_DEBUG("Failed to remove old file '%s' (error: %d), continuing...", filename, remove_result);
-            }
-            
-            // Open file for writing (create new file)
-            lfs_file_t file;
-            int flags = LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC;
-            int open_result = lfs_file_open(extended_lfs, &file, filename, flags);
-            
-            if (open_result != LFS_ERR_OK) {
-                LOG_ERROR("Failed to open '%s' for writing in extended FS (error: %d)", filename, open_result);
-                LOG_ERROR("Filesystem may be full or corrupted - max blocks: 80");
-                // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
-                return false;
-            }
-            
-            LOG_DEBUG("File opened successfully, encoding protobuf to buffer (expected size: %u)...", (unsigned)protoSize);
-            
-            // Allocate buffer for protobuf encoding (use protoSize as estimate, but add some margin)
-            size_t buffer_size = protoSize + 256;  // Add 256 bytes margin for protobuf overhead
-            uint8_t* encode_buffer = (uint8_t*)malloc(buffer_size);
-            
-            if (!encode_buffer) {
-                LOG_ERROR("Failed to allocate %u bytes for protobuf encoding", (unsigned)buffer_size);
-                lfs_file_close(extended_lfs, &file);
-                // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
-                return false;
-            }
-            
-            // Encode protobuf to buffer (this doesn't use SPI lock)
-            pb_ostream_t stream = pb_ostream_from_buffer(encode_buffer, buffer_size);
-            
-            if (!pb_encode(&stream, fields, dest_struct)) {
-                const char* error = PB_GET_ERROR(&stream);
-                LOG_ERROR("Error: can't encode protobuf: %s", error ? error : "unknown");
-                free(encode_buffer);
-                lfs_file_close(extended_lfs, &file);
-                // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
-                return false;
-            }
-            
-            size_t encoded_size = stream.bytes_written;
-            LOG_DEBUG("Protobuf encoded successfully: %u bytes", (unsigned)encoded_size);
-            
-            // Write buffer to file using lfs_file_write
-            LOG_DEBUG("Step 3: Writing %u bytes to file '%s'...", (unsigned)encoded_size, filename);
-            uint32_t write_start = millis();
-            lfs_ssize_t write_result = lfs_file_write(extended_lfs, &file, encode_buffer, encoded_size);
-            uint32_t write_time = millis() - write_start;
-            
-            if (write_result < 0) {
-                LOG_ERROR("Step 3 FAILED: Write to '%s' failed (error: %d, took %u ms)", filename, (int)write_result, write_time);
-                LOG_ERROR("Failed to write %u bytes to extended FS (error: %d)", (unsigned)encoded_size, (int)write_result);
-                LOG_ERROR("Filesystem may be full or corrupted - max blocks: 80");
-                
-                // Close file before reformat
-                lfs_file_close(extended_lfs, &file);
-                free(encode_buffer);
-                
-                // Try to reformat filesystem if error is -5 (LFS_ERR_NOSPC) or other critical errors
-                // But only once per save operation to avoid infinite loops
-                static bool reformat_attempted_this_save = false;
-                if ((write_result == -5 || write_result == -84) && !reformat_attempted_this_save) {
-                    reformat_attempted_this_save = true;
-                    LOG_WARN("Critical filesystem error detected - attempting reformat...");
-                    extern bool forceReformatExtendedFS();
-                    if (forceReformatExtendedFS()) {
-                        LOG_INFO("Filesystem reformatted successfully - retrying write...");
-                        // Get fresh filesystem pointer after reformat
-                        extended_lfs = (lfs_t*)getExtendedFSForNodeDB();
-                        if (extended_lfs) {
-                            // Retry write after reformat (recursive call, but only once)
-                            bool retry_result = saveProto(filename, protoSize, fields, dest_struct, fullAtomic);
-                            reformat_attempted_this_save = false;  // Reset for next save
-                            return retry_result;
-                        } else {
-                            LOG_ERROR("Failed to get filesystem pointer after reformat - extended filesystem unavailable");
-                            reformat_attempted_this_save = false;
-                            // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
-                            return false;
-                        }
-                    } else {
-                        LOG_ERROR("Filesystem reformat failed - extended filesystem unavailable");
-                        reformat_attempted_this_save = false;
-                        // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
-                        return false;
-                    }
-                } else if (reformat_attempted_this_save) {
-                    LOG_WARN("Reformat already attempted this save - extended filesystem unavailable");
-                    reformat_attempted_this_save = false;
-                    // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
-                    return false;
-                } else {
-                    // First attempt failed, will try reformat on retry
-                    return false;
-                }
-            } else if ((size_t)write_result != encoded_size) {
-                LOG_ERROR("Partial write: expected %u bytes, wrote %d", (unsigned)encoded_size, (int)write_result);
-                lfs_file_close(extended_lfs, &file);
-                free(encode_buffer);
-                // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
-                return false;
-            } else {
-                LOG_DEBUG("Step 3 SUCCESS: Wrote %u bytes to file '%s' (took %u ms)", (unsigned)encoded_size, filename, write_time);
-                okay = true;
-            }
-            
-            free(encode_buffer);
-            
-            // Sync file before closing (CRITICAL for LittleFS)
-            LOG_DEBUG("Step 4: Syncing file '%s'...", filename);
-            uint32_t sync_start = millis();
-            int sync_result = lfs_file_sync(extended_lfs, &file);
-            uint32_t sync_time = millis() - sync_start;
-            if (sync_result != LFS_ERR_OK) {
-                LOG_WARN("Step 4 FAILED: Sync of '%s' failed (error: %d, took %u ms)", filename, sync_result, sync_time);
-                okay = false;  // Mark as failed if sync fails
-            } else {
-                LOG_DEBUG("Step 4 SUCCESS: File '%s' synced (took %u ms)", filename, sync_time);
-            }
-            
-            // Close file
-            LOG_DEBUG("Step 5: Closing file '%s'...", filename);
-            uint32_t close_start = millis();
-            int close_result = lfs_file_close(extended_lfs, &file);
-            uint32_t close_time = millis() - close_start;
-            if (close_result != LFS_ERR_OK) {
-                LOG_WARN("Step 5 FAILED: Close of '%s' failed (error: %d, took %u ms)", filename, close_result, close_time);
-                okay = false;  // Mark as failed if close fails
-            } else {
-                LOG_DEBUG("Step 5 SUCCESS: File '%s' closed (took %u ms)", filename, close_time);
-            }
-            
-            if (okay) {
-                LOG_INFO("Saved %s successfully to EXTENDED filesystem (%u bytes)", filename, (unsigned)encoded_size);
-                
-                // Verify file was saved to extended filesystem and NOT to main filesystem
-                LOG_DEBUG("VERIFY: Step 1: Checking if '%s' exists in extended filesystem...", filename);
-                uint32_t verify_start = millis();
-                bool found_in_extended = false;
-                lfs_file_t verify_file;
-                int verify_result = lfs_file_open(extended_lfs, &verify_file, filename, LFS_O_RDONLY);
-                if (verify_result == LFS_ERR_OK) {
-                    found_in_extended = true;
-                    lfs_soff_t file_size = lfs_file_size(extended_lfs, &verify_file);
-                    lfs_file_close(extended_lfs, &verify_file);
-                    LOG_DEBUG("VERIFY: Step 1 SUCCESS: File '%s' found in extended FS (size: %d bytes)", filename, (int)file_size);
-                } else {
-                    LOG_DEBUG("VERIFY: Step 1 FAILED: File '%s' not found in extended FS (error: %d)", filename, verify_result);
-                }
-                
-                LOG_DEBUG("VERIFY: Step 2: Checking if '%s' exists in main filesystem...", filename);
-                bool found_in_main = FSCom.exists(filename);
-                if (found_in_main) {
-                    LOG_DEBUG("VERIFY: Step 2: File '%s' found in main FS (this is WRONG for nodes.proto!)", filename);
-                } else {
-                    LOG_DEBUG("VERIFY: Step 2 SUCCESS: File '%s' NOT in main FS (correct)", filename);
-                }
-                
-                uint32_t verify_time = millis() - verify_start;
-                
-                if (found_in_extended && !found_in_main) {
-                    LOG_INFO("VERIFIED: %s correctly saved to EXTENDED filesystem (80 pages, 320 KB, verification took %u ms)", 
-                            filename, verify_time);
-                } else if (found_in_main) {
-                    LOG_ERROR("VERIFY FAILED: %s was also found in MAIN filesystem - this should not happen!", filename);
-                    LOG_ERROR("nodes.proto should ONLY be in extended filesystem!");
-                } else if (!found_in_extended) {
-                    LOG_ERROR("VERIFY FAILED: %s not found in EXTENDED filesystem after save (verification took %u ms)!", 
-                             filename, verify_time);
-                }
-                
-                return true;
-            } else {
-                LOG_ERROR("Can't write %s to extended filesystem!", filename);
-                // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
-                return false;
-            }
-        } else {
+        if (!extended_lfs) {
             LOG_WARN("Extended filesystem pointer is null - extended filesystem unavailable");
             // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
             return false;
         }
-    }
-    // Not a NodeDB file or extended FS not enabled - use main filesystem (normal behavior)
-    #endif // USE_EXTENDED_FS_FOR_NODEDB
-    
-    // Use main filesystem (standard behavior) - for all files except nodes.proto
-    // config.proto, device.proto, module.proto, channels.proto, uiconfig.proto always go here
-    auto f = SafeFile(filename, fullAtomic);
+        
+        // Reset reformat flag at start of save operation
+        static bool reformat_attempted_this_save = false;
+        if (reformat_attempted_this_save) {
+            reformat_attempted_this_save = false;  // Reset for new save operation
+        }
+        
+        // CRITICAL: Extended filesystem uses SoftDevice API directly, NOT SPI!
+        // Do NOT use writecb here - it uses spiLock for SPI bus (LoRa radio + main filesystem).
+        // Use streaming encoding instead: encode directly to file, no buffer allocation needed!
+        // This avoids memory fragmentation issues when free heap is fragmented.
+        
+        LOG_DEBUG("Opening %s for writing in extended filesystem (streaming, no buffer)...", filename);
+        
+        // Ensure directory exists (e.g., /prefs/ for /prefs/nodes.proto)
+        const char* slash = filename;
+        if (slash[0] == '/') {
+            slash++; // skip root '/'
+        }
+        while (NULL != (slash = strchr(slash, '/'))) {
+            size_t dir_len = slash - filename;
+            char dir_path[64];
+            if (dir_len < sizeof(dir_path)) {
+                memcpy(dir_path, filename, dir_len);
+                dir_path[dir_len] = '\0';
+                int mkdir_result = lfs_mkdir(extended_lfs, dir_path);
+                if (mkdir_result != LFS_ERR_OK && mkdir_result != LFS_ERR_EXIST) {
+                    LOG_DEBUG("Failed to create directory '%s' in extended FS (error: %d), continuing...", dir_path, mkdir_result);
+                }
+            }
+            slash++; // move past '/'
+        }
+        
+        // Remove old file first (for atomic write)
+        // This is safer than truncate - avoids issues with block allocation
+        int remove_result = lfs_remove(extended_lfs, filename);
+        if (remove_result == LFS_ERR_OK) {
+            LOG_DEBUG("Removed old file '%s' before write", filename);
+        } else if (remove_result != LFS_ERR_NOENT) {
+            LOG_DEBUG("Failed to remove old file '%s' (error: %d), continuing...", filename, remove_result);
+        }
+        
+        // Open file for writing (create new file)
+        lfs_file_t file;
+        int flags = LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC;
+        int open_result = lfs_file_open(extended_lfs, &file, filename, flags);
+        
+        if (open_result != LFS_ERR_OK) {
+            LOG_ERROR("Failed to open '%s' for writing in extended FS (error: %d)", filename, open_result);
+            LOG_ERROR("Filesystem may be full or corrupted - max blocks: 80");
+            // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
+            return false;
+        }
+        
+        LOG_DEBUG("File opened successfully, encoding protobuf with streaming (expected size: %u)...", (unsigned)protoSize);
+        
+        // Use streaming encoding - no buffer allocation needed!
+        // This avoids memory fragmentation issues when free heap is fragmented
+        LfsFileContext ctx;
+        ctx.lfs = extended_lfs;
+        ctx.file = &file;
+        
+        pb_ostream_t stream = {&lfs_writecb, &ctx, SIZE_MAX, 0};
+        
+        LOG_DEBUG("Step 3: Encoding and writing protobuf to file '%s' (streaming, no buffer)...", filename);
+        uint32_t encode_start = millis();
+        bool encode_success = pb_encode(&stream, fields, dest_struct);
+        uint32_t encode_time = millis() - encode_start;
+        
+        if (!encode_success) {
+            const char* error = PB_GET_ERROR(&stream);
+            LOG_ERROR("Step 3 FAILED: Protobuf encoding failed: %s (took %u ms)", error ? error : "unknown", encode_time);
+            lfs_file_close(extended_lfs, &file);
+            // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
+            return false;
+        }
+        
+        size_t encoded_size = stream.bytes_written;
+        LOG_DEBUG("Step 3 SUCCESS: Encoded and wrote %u bytes to file '%s' (streaming, took %u ms)", 
+                 (unsigned)encoded_size, filename, encode_time);
+        
+        // Check if write was successful by checking file size
+        lfs_soff_t file_size = lfs_file_size(extended_lfs, &file);
+        if (file_size < 0 || (size_t)file_size != encoded_size) {
+            LOG_ERROR("Step 3 VERIFICATION FAILED: File size mismatch! Expected %u bytes, got %d", 
+                     (unsigned)encoded_size, (int)file_size);
+            lfs_file_close(extended_lfs, &file);
+            // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
+            return false;
+        }
+        
+        // Sync file before closing (CRITICAL for LittleFS)
+        LOG_DEBUG("Step 4: Syncing file '%s'...", filename);
+        uint32_t sync_start = millis();
+        int sync_result = lfs_file_sync(extended_lfs, &file);
+        uint32_t sync_time = millis() - sync_start;
+        if (sync_result != LFS_ERR_OK) {
+            LOG_ERROR("Step 4 FAILED: Sync of '%s' failed (error: %d, took %u ms)", filename, sync_result, sync_time);
+            lfs_file_close(extended_lfs, &file);
+            // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
+            return false;
+        }
+        LOG_DEBUG("Step 4 SUCCESS: File synced (took %u ms)", sync_time);
+        
+        // Close file
+        LOG_DEBUG("Step 5: Closing file '%s'...", filename);
+        uint32_t close_start = millis();
+        int close_result = lfs_file_close(extended_lfs, &file);
+        uint32_t close_time = millis() - close_start;
+        if (close_result != LFS_ERR_OK) {
+            LOG_WARN("Step 5 FAILED: Close of '%s' failed (error: %d, took %u ms)", filename, close_result, close_time);
+            okay = false;  // Mark as failed if close fails
+        } else {
+            LOG_DEBUG("Step 5 SUCCESS: File '%s' closed (took %u ms)", filename, close_time);
+            okay = true;  // Mark as successful after all steps completed
+        }
+        
+        if (okay) {
+            LOG_INFO("Saved %s successfully to EXTENDED filesystem (%u bytes)", filename, (unsigned)encoded_size);
+            
+            // Verify file was saved to extended filesystem and NOT to main filesystem
+            LOG_DEBUG("VERIFY: Step 1: Checking if '%s' exists in extended filesystem...", filename);
+            uint32_t verify_start = millis();
+            bool found_in_extended = false;
+            lfs_file_t verify_file;
+            int verify_result = lfs_file_open(extended_lfs, &verify_file, filename, LFS_O_RDONLY);
+            if (verify_result == LFS_ERR_OK) {
+                found_in_extended = true;
+                lfs_soff_t file_size = lfs_file_size(extended_lfs, &verify_file);
+                lfs_file_close(extended_lfs, &verify_file);
+                LOG_DEBUG("VERIFY: Step 1 SUCCESS: File '%s' found in extended FS (size: %d bytes)", filename, (int)file_size);
+            } else {
+                LOG_DEBUG("VERIFY: Step 1 FAILED: File '%s' not found in extended FS (error: %d)", filename, verify_result);
+            }
+            
+            LOG_DEBUG("VERIFY: Step 2: Checking if '%s' exists in main filesystem...", filename);
+            bool found_in_main = FSCom.exists(filename);
+            if (found_in_main) {
+                LOG_DEBUG("VERIFY: Step 2: File '%s' found in main FS (this is WRONG for nodes.proto!)", filename);
+            } else {
+                LOG_DEBUG("VERIFY: Step 2 SUCCESS: File '%s' NOT in main FS (correct)", filename);
+            }
+            
+            uint32_t verify_time = millis() - verify_start;
+            
+            if (found_in_extended && !found_in_main) {
+                LOG_INFO("VERIFIED: %s correctly saved to EXTENDED filesystem (80 pages, 320 KB, verification took %u ms)", 
+                        filename, verify_time);
+            } else if (found_in_main) {
+                LOG_ERROR("VERIFY FAILED: %s was also found in MAIN filesystem - this should not happen!", filename);
+                LOG_ERROR("nodes.proto should ONLY be in extended filesystem!");
+            } else if (!found_in_extended) {
+                LOG_ERROR("VERIFY FAILED: %s not found in EXTENDED filesystem after save (verification took %u ms)!", 
+                         filename, verify_time);
+            }
+            
+            return true;
+        } else {
+            LOG_ERROR("Can't write %s to extended filesystem!", filename);
+            // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
+            return false;
+        }
+        #endif // USE_EXTENDED_FS_FOR_NODEDB
+    } else if (fsType == FilesystemType::MAIN_FS) {
+        // Use main filesystem (standard behavior) - for all files except nodes.proto
+        // config.proto, device.proto, module.proto, channels.proto, uiconfig.proto always go here
+        LOG_INFO("Save %s to MAIN filesystem (7 pages, 28 KB) - current node configuration", filename);
+        
+        auto f = SafeFile(filename, fullAtomic);
+        pb_ostream_t stream = {&writecb, static_cast<Print *>(&f), protoSize};
 
-    LOG_INFO("Save %s to MAIN filesystem (7 pages, 28 KB) - current node configuration", filename);
-    pb_ostream_t stream = {&writecb, static_cast<Print *>(&f), protoSize};
+        if (!pb_encode(&stream, fields, dest_struct)) {
+            LOG_ERROR("Error: can't encode protobuf %s", PB_GET_ERROR(&stream));
+        } else {
+            okay = true;
+        }
 
-    if (!pb_encode(&stream, fields, dest_struct)) {
-        LOG_ERROR("Error: can't encode protobuf %s", PB_GET_ERROR(&stream));
-    } else {
-        okay = true;
-    }
+        bool writeSucceeded = f.close();
 
-    bool writeSucceeded = f.close();
-
-    if (!okay || !writeSucceeded) {
-        LOG_ERROR("Can't write prefs!");
-    } else {
-        // Verify file was saved to correct filesystem
+        if (!okay || !writeSucceeded) {
+            LOG_ERROR("Can't write prefs!");
+        } else {
+            // Verify file was saved to correct filesystem
         #ifdef USE_EXTENDED_FS_FOR_NODEDB
         extern bool isNodeDBFile(const char* filename);
         extern void* getExtendedFSForNodeDB();
@@ -1939,6 +1937,7 @@ bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_
             }
         }
         #endif // USE_EXTENDED_FS_FOR_NODEDB
+        }
     }
 #else
     LOG_ERROR("ERROR: Filesystem not implemented");
@@ -2330,6 +2329,15 @@ bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelInde
 #if !(MESHTASTIC_EXCLUDE_PKI)
     if (p.public_key.size == 32) {
         printBytes("Incoming Pubkey: ", p.public_key.bytes, 32);
+        
+        // Log when public key is received from a node (for debugging decryption issues)
+        // Format first 8 bytes for identification (not security risk - just for logging)
+        char pubkey_hex[17];
+        for (int i = 0; i < 8; i++) {
+            snprintf(pubkey_hex + i * 2, 3, "%02X", p.public_key.bytes[i]);
+        }
+        pubkey_hex[16] = '\0';
+        LOG_INFO("Node 0x%08x: Public key received from nodeinfo (first 8 bytes: %s...)", nodeId, pubkey_hex);
 
         // Alert the user if a remote node is advertising public key that matches our own
         if (owner.public_key.size == 32 && memcmp(p.public_key.bytes, owner.public_key.bytes, 32) == 0 && !duplicateWarned) {
@@ -2344,6 +2352,7 @@ bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelInde
             service->sendClientNotification(cn);
         }
     }
+    bool is_new_pubkey = false;
     if (info->user.public_key.size > 0) { // if we have a key for this user already, don't overwrite with a new one
         LOG_INFO("Public Key set for node, not updating!");
         // we copy the key into the incoming packet, to prevent overwrite
@@ -2351,6 +2360,7 @@ bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelInde
         memcpy(p.public_key.bytes, info->user.public_key.bytes, 32);
     } else if (p.public_key.size > 0) {
         LOG_INFO("Update Node Pubkey!");
+        is_new_pubkey = true;  // Mark that we're setting a new public key
     }
 #endif
 
@@ -2377,8 +2387,19 @@ bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelInde
         // store our DB unless we just did so less than a minute ago
 
         if (!Throttle::isWithinTimespanMs(lastNodeDbSave, ONE_MINUTE_MS)) {
-            saveToDisk(SEGMENT_NODEDATABASE);
+            bool save_success = saveToDisk(SEGMENT_NODEDATABASE);
             lastNodeDbSave = millis();
+            
+            // Log when new node's public key is successfully saved to disk
+            if (save_success && is_new_pubkey && info->user.public_key.size == 32) {
+                // Format public key first 8 bytes for identification (not security risk - just for logging)
+                char pubkey_hex[17];
+                for (int i = 0; i < 8; i++) {
+                    snprintf(pubkey_hex + i * 2, 3, "%02X", info->user.public_key.bytes[i]);
+                }
+                pubkey_hex[16] = '\0';
+                LOG_INFO("Node 0x%08x: Public key saved to disk (first 8 bytes: %s...)", nodeId, pubkey_hex);
+            }
         } else {
             LOG_DEBUG("Defer NodeDB saveToDisk for now");
         }
@@ -2575,8 +2596,8 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
         meshNodes->push_back(newNode);
         numMeshNodes++;
         lite = &meshNodes->at(numMeshNodes - 1);
-        LOG_INFO("Adding node to database with %i nodes and %u bytes free! (capacity: %u)", 
-                numMeshNodes, memGet.getFreeHeap(), meshNodes->capacity());
+        LOG_INFO("Adding node 0x%08x to database with %i nodes and %u bytes free! (capacity: %u)", 
+                n, numMeshNodes, memGet.getFreeHeap(), meshNodes->capacity());
     }
 
     return lite;

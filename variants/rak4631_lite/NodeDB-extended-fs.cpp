@@ -1061,11 +1061,26 @@ namespace ExtendedNodeDBFS
                 }
                 
                 if (!erase_success) {
-                    pages_failed++;
+                    // Verify erase by reading first word of page
+                    uint32_t page_addr = page_number * FLASH_NRF52_PAGE_SIZE;
+                    uint32_t first_word = *(volatile uint32_t*)page_addr;
+                    if (first_word == 0xFFFFFFFF) {
+                        // Page appears erased even though event wasn't received
+                        LOG_WARN("Page %u erase event not received, but page appears erased (0xFFFFFFFF at 0x%08X)", 
+                                page_number, page_addr);
+                        pages_erased++;  // Count as succeeded
+                    } else {
+                        LOG_ERROR("Page %u erase FAILED - first word is 0x%08X (expected 0xFFFFFFFF)", 
+                                 page_number, first_word);
+                        pages_failed++;
+                    }
                 }
             }
             
             LOG_INFO("Page erase complete: %u succeeded, %u failed", pages_erased, pages_failed);
+            if (pages_failed > 0) {
+                LOG_ERROR("CRITICAL: %u pages failed to erase - filesystem may be corrupted!", pages_failed);
+            }
             return (pages_failed == 0);
         };
         

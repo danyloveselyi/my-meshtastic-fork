@@ -135,6 +135,7 @@ bool CryptoEngine::decryptCurve25519(uint32_t fromNode, meshtastic_UserLite_publ
 
     // Calculate the shared secret with the sending node and decrypt
     if (!crypto->setDHPublicKey(remotePublic.bytes)) {
+        LOG_WARN("Failed to set DH public key for node 0x%08x (invalid key format?)", fromNode);
         return false;
     }
     crypto->hash(shared_key, 32);

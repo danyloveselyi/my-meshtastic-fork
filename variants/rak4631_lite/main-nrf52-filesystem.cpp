@@ -271,22 +271,52 @@ void preFSBegin()
     
     if (is_warm_boot && is_corruption_flag) {
         LOG_WARN("⚠️  GPREGRET corruption flag detected!");
-        LOG_WARN("⚠️  Will format filesystem (MINIMAL format, NO erase pages)");
-        LOG_WARN("⚠️  Full erase pages will be done in fsInitExtended() AFTER USB");
+        LOG_WARN("⚠️  CRITICAL: Checking which filesystem is corrupted...");
+        
+        // КРИТИЧЕСКИ ВАЖНО: Проверить, какая файловая система повреждена!
+        // Extended filesystem может вызвать lfs_assert(), который установит GPREGRET,
+        // но это НЕ означает, что основная файловая система повреждена!
+        // 
+        // Проверяем основную файловую систему перед форматированием:
+        // 1. Пытаемся смонтировать основную файловую систему
+        // 2. Если монтирование успешно - основная FS НЕ повреждена, НЕ форматируем!
+        // 3. Если монтирование не удалось - основная FS повреждена, форматируем
+        
+        LOG_INFO("Step 1: Attempting to mount MAIN filesystem to check if it's corrupted...");
+        bool main_fs_corrupted = false;
+        
+        // Пытаемся смонтировать основную файловую систему
+        // Если монтирование успешно - основная FS НЕ повреждена
+        if (!InternalFS.begin()) {
+            LOG_WARN("⚠️  MAIN filesystem mount FAILED - it IS corrupted!");
+            LOG_WARN("⚠️  Will format MAIN filesystem (MINIMAL format, NO erase pages)");
+            main_fs_corrupted = true;
+        } else {
+            LOG_INFO("✓ MAIN filesystem mount SUCCESS - it is NOT corrupted!");
+            LOG_INFO("✓ Corruption flag was likely from EXTENDED filesystem only");
+            LOG_INFO("✓ Will NOT format MAIN filesystem (it's safe!)");
+            LOG_INFO("✓ Extended filesystem will be handled in fsInitExtended()");
+            main_fs_corrupted = false;
+        }
         
         NRF_POWER->GPREGRET = 0;
         millis_until_formatting_again = millis() + MULTIPLE_CORRUPTION_DELAY_MILLIS;
         LOG_INFO("  - GPREGRET cleared");
         LOG_INFO("  - millis_until_formatting_again set to: %lu", millis_until_formatting_again);
         
-        // БЕЗОПАСНО: Быстрый format БЕЗ erase pages
-        // InternalFS.format() выполнит минимальное форматирование (быстро)
-        // Полный erase всех страниц будет в fsInitExtended() (после USB гарантированно готов)
-        LOG_INFO("Calling InternalFS.format() (MINIMAL, FAST, NO ERASE PAGES)...");
-        uint32_t format_start = millis();
-        InternalFS.format();
-        uint32_t format_time = millis() - format_start;
-        LOG_INFO("InternalFS.format() completed in %lu ms (MINIMAL format)", format_time);
+        if (main_fs_corrupted) {
+            // БЕЗОПАСНО: Быстрый format БЕЗ erase pages
+            // InternalFS.format() выполнит минимальное форматирование (быстро)
+            // Полный erase всех страниц будет в fsInitExtended() (после USB гарантированно готов)
+            LOG_INFO("Calling InternalFS.format() (MINIMAL, FAST, NO ERASE PAGES)...");
+            uint32_t format_start = millis();
+            InternalFS.format();
+            uint32_t format_time = millis() - format_start;
+            LOG_INFO("InternalFS.format() completed in %lu ms (MINIMAL format)", format_time);
+        } else {
+            LOG_INFO("Skipping MAIN filesystem format - it's not corrupted!");
+        }
+        
         LOG_INFO("preFSBegin() returning (corruption handled safely)");
         LOG_INFO("========================================");
         return;
