@@ -17,11 +17,15 @@
 #include "SPILock.h"
 #include "SafeFile.h"
 #include "TypeConversions.h"
+#include "Throttle.h"  // For throttling NodeDB saves
 #include "error.h"
 #include "main.h"
 #include "mesh-pb-constants.h"
 #include "meshUtils.h"
 #include "modules/NeighborInfoModule.h"
+#ifdef ARCH_NRF52
+#include "RadioLibInterface.h"  // For checking radio state before flash writes
+#endif
 #include <ErriezCRC32.h>
 #include <algorithm>
 #include <pb_decode.h>
@@ -310,9 +314,10 @@ NodeDB::NodeDB()
     info->has_user = true;
 
     // If node database has not been saved for the first time, save it now
+    // This is critical - use immediate=true to bypass throttling
 #ifdef FSCom
     if (!FSCom.exists(nodeDatabaseFileName)) {
-        saveNodeDatabaseToDisk();
+        saveNodeDatabaseToDisk(true); // immediate=true for first save
     }
 #endif
 
@@ -961,7 +966,7 @@ void NodeDB::resetNodes()
     std::fill(nodeDatabase.nodes.begin() + 1, nodeDatabase.nodes.end(), meshtastic_NodeInfoLite());
     devicestate.has_rx_text_message = false;
     devicestate.has_rx_waypoint = false;
-    saveNodeDatabaseToDisk();
+    saveNodeDatabaseToDisk(true); // immediate=true for reset (critical operation)
     saveDeviceStateToDisk();
     if (neighborInfoModule && moduleConfig.neighbor_info.enabled)
         neighborInfoModule->resetNeighbors();
@@ -980,7 +985,7 @@ void NodeDB::removeNodeByNum(NodeNum nodeNum)
     std::fill(nodeDatabase.nodes.begin() + numMeshNodes, nodeDatabase.nodes.begin() + numMeshNodes + 1,
               meshtastic_NodeInfoLite());
     LOG_DEBUG("NodeDB::removeNodeByNum purged %d entries. Save changes", removed);
-    saveNodeDatabaseToDisk();
+    saveNodeDatabaseToDisk(true); // immediate=true for remove (critical operation)
 }
 
 void NodeDB::clearLocalPosition()
@@ -1896,8 +1901,52 @@ bool NodeDB::saveDeviceStateToDisk()
     spiLock->unlock();
 #endif
     return saveProto(deviceStateFileName, meshtastic_DeviceState_size, &meshtastic_DeviceState_msg, &devicestate, false);
-}bool NodeDB::saveNodeDatabaseToDisk()
+}bool NodeDB::saveNodeDatabaseToDisk(bool immediate)
 {
+    // OPTIMIZATION: Apply throttling to prevent excessive flash writes
+    // Only skip throttling for immediate saves (critical operations like reset, remove)
+    if (!immediate) {
+        // Check if we saved recently (within last minute) - same throttling as updateUser()
+        if (Throttle::isWithinTimespanMs(lastNodeDbSave, ONE_MINUTE_MS)) {
+            LOG_DEBUG("Defer NodeDB saveToDisk - throttled (last save was %u ms ago)", 
+                     millis() - lastNodeDbSave);
+            return true; // Return success to avoid error handling, but don't actually save
+        }
+        
+        // OPTIMIZATION: Check radio state - avoid writing during active packet reception
+        // Writing during transmission is OK (reception is disabled anyway)
+        // But writing during reception can cause packet loss
+#ifdef ARCH_NRF52
+        if (RadioLibInterface::instance != nullptr) {
+            // Check if radio is actively receiving a packet
+            if (RadioLibInterface::instance->isActivelyReceiving()) {
+                // Wait a bit for reception to complete (typical LoRa packet is 10-100ms)
+                // But don't wait too long - max 200ms
+                uint32_t wait_start = millis();
+                uint32_t max_wait = 200; // Maximum wait time in ms
+                
+                while (RadioLibInterface::instance->isActivelyReceiving() && 
+                       (millis() - wait_start) < max_wait) {
+                    yield(); // Allow other tasks to run
+                    delay(10); // Small delay to avoid busy-wait
+                }
+                
+                // If still receiving after wait, log warning but proceed with save
+                // (better to save than lose data, and reception might be stuck)
+                if (RadioLibInterface::instance->isActivelyReceiving()) {
+                    LOG_WARN("NodeDB save: Radio still receiving after %u ms wait - proceeding with save anyway", 
+                            millis() - wait_start);
+                } else {
+                    LOG_DEBUG("NodeDB save: Waited %u ms for reception to complete", 
+                             millis() - wait_start);
+                }
+            }
+            // Note: We don't check isSending() - writing during transmission is fine
+            // because reception is disabled during transmission anyway
+        }
+#endif
+    }
+    
 #ifdef FSCom
     spiLock->lock();
     FSCom.mkdir("/prefs");
@@ -1920,6 +1969,11 @@ bool NodeDB::saveDeviceStateToDisk()
     // if (saveResult && (nodeDatabaseSize > 50000 || numMeshNodes > 100)) {
     //     verifyNodeDatabaseFromDisk();
     // }
+
+    // Update last save time for throttling
+    if (saveResult) {
+        lastNodeDbSave = millis();
+    }
 
     return saveResult;
 }
@@ -2031,7 +2085,9 @@ bool NodeDB::saveToDiskNoRetry(int saveWhat)
     }
 
     if (saveWhat & SEGMENT_NODEDATABASE) {
-        success &= saveNodeDatabaseToDisk();
+        // Use throttled save (immediate=false) - saveToDisk() is called from updateUser() which already has throttling
+        // But we also apply throttling here as a safeguard
+        success &= saveNodeDatabaseToDisk(false);
     }
 
     return success;
@@ -2108,7 +2164,6 @@ size_t NodeDB::getNumOnlineMeshNodes(bool localOnly)
 }
 
 #include "MeshModule.h"
-#include "Throttle.h"
 
 /** Update position info for this node based on received position data
  */
@@ -2196,7 +2251,8 @@ void NodeDB::addFromContact(meshtastic_SharedContact contact)
     updateGUIforNode = info;
     powerFSM.trigger(EVENT_NODEDB_UPDATED);
     notifyObservers(true); // Force an update whether or not our node counts have changed
-    saveNodeDatabaseToDisk();
+    // Use throttled save (immediate=false) - key verification is not critical enough to bypass throttling
+    saveNodeDatabaseToDisk(false);
 }
 
 /** Update user info and channel for this node based on received user data
