@@ -149,7 +149,7 @@ ProcessMessage DeviceStatsModule::handleReceived(const meshtastic_MeshPacket &mp
 
 #ifdef DEBUG_PORT
     auto &p = mp.decoded;
-    LOG_INFO(DS_LOG_PREFIX "Received text msg from=0x%0x, id=0x%x, msg=%.*s", mp.from, mp.id, p.payload.size, p.payload.bytes);
+    LOG_INFO(DS_LOG_PREFIX "Received text msg from=0x%x, id=0x%x, msg=%.*s", mp.from, mp.id, p.payload.size, p.payload.bytes);
 #endif
 
     powerFSM.trigger(EVENT_RECEIVED_MSG);
@@ -242,7 +242,7 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
     const char* replyText = nullptr;
 
     auto logCommand = [&](const char* cmd) {
-        DS_LOG_INFO("DeviceStats command %s from=0x%0x", cmd, original.from);
+        DS_LOG_INFO("DeviceStats command %s from=0x%x", cmd, original.from);
     };
 
     // Reset other waiting states when user starts a new command (to avoid conflicts)
@@ -372,27 +372,27 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
         if (pinStr) trim(pinStr);
         bool pinOk = pinStr && pinStr[0] != '\0' && strcmp(pinStr, MONITORING_PIN_CODE) == 0;
 
-    DS_LOG_INFO("DeviceStats command setmaxnodes apply value=%d from=0x%0x", maxNodes, original.from);
+    DS_LOG_INFO("DeviceStats command setmaxnodes apply value=%d from=0x%x", maxNodes, original.from);
 
         if (!pinOk) {
             waitingSetMaxNodesNodeId = 0;
             replyText = "Failed: PIN code incorrect.";
-            DS_LOG_WARN("DeviceStats setmaxnodes pin failed from=0x%0x", original.from);
+            DS_LOG_WARN("DeviceStats setmaxnodes pin failed from=0x%x", original.from);
         } else if (maxNodes <= 0) {
             waitingSetMaxNodesNodeId = 0;
             replyText = "Invalid value: enter a positive number.";
-            DS_LOG_WARN("DeviceStats setmaxnodes invalid non-positive value from=0x%0x", original.from);
+            DS_LOG_WARN("DeviceStats setmaxnodes invalid non-positive value from=0x%x", original.from);
         } else if (maxNodes > 1000) {
             waitingSetMaxNodesNodeId = 0;
             replyText = "Error: Maximum allowed is 1000 nodes.";
-            DS_LOG_WARN("DeviceStats setmaxnodes above upper bound value=%d from=0x%0x", maxNodes, original.from);
+            DS_LOG_WARN("DeviceStats setmaxnodes above upper bound value=%d from=0x%x", maxNodes, original.from);
         } else if (maxNodes < (int)MAX_NUM_NODES) {
             waitingSetMaxNodesNodeId = 0;
             snprintf(replyBuffer, sizeof(replyBuffer),
                      "Error: Cannot set below compile limit (%u). Dynamic limit can only INCREASE capacity, not decrease.",
                      MAX_NUM_NODES);
             replyText = replyBuffer;
-            DS_LOG_WARN("DeviceStats setmaxnodes below compile limit=%u requested=%d from=0x%0x",
+            DS_LOG_WARN("DeviceStats setmaxnodes below compile limit=%u requested=%d from=0x%x",
                      MAX_NUM_NODES, maxNodes, original.from);
         } else if (maxNodes <= (int)dynamic_max_nodes) {
             waitingSetMaxNodesNodeId = 0;
@@ -400,7 +400,7 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
                      "Error: New limit (%d) must be GREATER than current (%u). Cannot decrease.",
                      maxNodes, dynamic_max_nodes);
             replyText = replyBuffer;
-            DS_LOG_WARN("DeviceStats setmaxnodes not increasing current=%u requested=%d from=0x%0x",
+            DS_LOG_WARN("DeviceStats setmaxnodes not increasing current=%u requested=%d from=0x%x",
                      dynamic_max_nodes, maxNodes, original.from);
         } else {
             uint32_t currentNodes = nodeDB ? NodeStats::getValidNodeCount(nodeDB) : 0;
@@ -410,7 +410,7 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
                 snprintf(replyBuffer, sizeof(replyBuffer),
                          "Error: Cannot set below current node count (%u).", currentNodes);
                 replyText = replyBuffer;
-                DS_LOG_WARN("DeviceStats setmaxnodes below current node count current=%u requested=%d from=0x%0x",
+                DS_LOG_WARN("DeviceStats setmaxnodes below current node count current=%u requested=%d from=0x%x",
                          currentNodes, maxNodes, original.from);
             } else {
                 int32_t nodeDelta = maxNodes - static_cast<int32_t>(currentNodes);
@@ -423,7 +423,7 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
                              "Error: Not enough memory. Need %u bytes, have %u free. Current: %u nodes.",
                              additionalMemory, freeHeap, currentNodes);
                     replyText = replyBuffer;
-                    DS_LOG_WARN("DeviceStats setmaxnodes denied memory low required=%u free=%u from=0x%0x",
+                    DS_LOG_WARN("DeviceStats setmaxnodes denied memory low required=%u free=%u from=0x%x",
                              additionalMemory, freeHeap, original.from);
                 } else {
                     dynamic_max_nodes = static_cast<uint32_t>(maxNodes);
@@ -433,7 +433,7 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
                     snprintf(replyBuffer, sizeof(replyBuffer), "Max nodes limit increased to %d (dynamic allocation).",
                              maxNodes);
                     replyText = replyBuffer;
-                    DS_LOG_INFO("DeviceStats setmaxnodes success new=%d currentNodes=%u from=0x%0x",
+                    DS_LOG_INFO("DeviceStats setmaxnodes success new=%d currentNodes=%u from=0x%x",
                              maxNodes, currentNodes, original.from);
                 }
             }
@@ -463,12 +463,12 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
         if (pinStr) trim(pinStr);
         bool pinOk = pinStr && pinStr[0] != '\0' && strcmp(pinStr, MONITORING_PIN_CODE) == 0;
 
-    DS_LOG_INFO("DeviceStats command monstart apply interval=%d from=0x%0x", interval, original.from);
+    DS_LOG_INFO("DeviceStats command monstart apply interval=%d from=0x%x", interval, original.from);
 
         if (!pinOk) {
             waitingMonStartNodeId = 0;
             replyText = "Failed: PIN code incorrect.";
-            DS_LOG_WARN("DeviceStats monstart pin failed from=0x%0x", original.from);
+            DS_LOG_WARN("DeviceStats monstart pin failed from=0x%x", original.from);
         } else if (interval >= 10 && interval <= 86400) {
             monitorIntervalMs = (uint32_t)interval * 1000;
             monitoringNodeId = original.from;
@@ -478,10 +478,10 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
             snprintf(replyBuffer, sizeof(replyBuffer),
                      "Monitor ON: %ds intervals. Send /monstop to disable.", interval);
             replyText = replyBuffer;
-            DS_LOG_INFO("DeviceStats monitoring enabled interval=%ds target=0x%0x", interval, original.from);
+            DS_LOG_INFO("DeviceStats monitoring enabled interval=%ds target=0x%x", interval, original.from);
         } else {
             replyText = "Invalid interval! Use 10-86400 seconds.";
-            DS_LOG_WARN("DeviceStats monstart invalid interval value=%d from=0x%0x", interval, original.from);
+            DS_LOG_WARN("DeviceStats monstart invalid interval value=%d from=0x%x", interval, original.from);
         }
     } else if (waitingMonStopNodeId == original.from) {
         // /monstop PIN check (expect only PIN)
@@ -493,11 +493,11 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
             waitingMonStopNodeId = 0;
             monitorMessageCounter = 0;
             replyText = "Memory monitoring stopped.";
-            DS_LOG_INFO("DeviceStats monitoring disabled by node 0x%0x", original.from);
+            DS_LOG_INFO("DeviceStats monitoring disabled by node 0x%x", original.from);
         } else {
             // Do not reset waitingMonStopNodeId, allow retry
             replyText = "Failed: PIN code incorrect. Try again.";
-            DS_LOG_WARN("DeviceStats monstop pin failed from=0x%0x", original.from);
+            DS_LOG_WARN("DeviceStats monstop pin failed from=0x%x", original.from);
         }
     }
 
@@ -505,7 +505,7 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
     if (!replyText) {
         snprintf(replyBuffer, sizeof(replyBuffer), "Auto-reply: %.200s", originalText);
         replyText = replyBuffer;
-    DS_LOG_DEBUG("DeviceStats fallback reply to 0x%0x", original.from);
+    DS_LOG_DEBUG("DeviceStats fallback reply to 0x%x", original.from);
     }
 
     // Critical: check router pointer before use (embedded safety)
@@ -559,7 +559,7 @@ void DeviceStatsModule::sendAutoReply(const meshtastic_MeshPacket &original)
     service->sendToMesh(reply, RX_SRC_LOCAL, true);
 
 #if defined(DEBUG_PORT) && !defined(DEBUG_MUTE)
-    LOG_INFO(DS_LOG_PREFIX "Sent auto-reply to node 0x%0x", original.from);
+    LOG_INFO(DS_LOG_PREFIX "Sent auto-reply to node 0x%x", original.from);
 #endif
 }
 
@@ -637,7 +637,7 @@ void DeviceStatsModule::sendMemoryStats(uint32_t toNode)
 
     service->sendToMesh(reply, RX_SRC_LOCAL, true);
 
-    DS_LOG_DEBUG("DeviceStats monitoring update #%u sent %u bytes to 0x%0x",
+    DS_LOG_DEBUG("DeviceStats monitoring update #%u sent %u bytes to 0x%x",
                  monitorMessageCounter, static_cast<unsigned int>(msgLen), toNode);
 }
 

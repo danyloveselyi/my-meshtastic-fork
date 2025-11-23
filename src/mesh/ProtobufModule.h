@@ -82,7 +82,7 @@ template <class T> class ProtobufModule : protected SinglePortModule
         // it would be better to update even if the message was destined to others.
 
         auto &p = mp.decoded;
-        LOG_INFO("Received %s from=0x%0x, id=0x%x, portnum=%d, payloadlen=%d", name, mp.from, mp.id, p.portnum, p.payload.size);
+        LOG_INFO("Received %s from=0x%x, id=0x%x, portnum=%d, payloadlen=%d", name, mp.from, mp.id, p.portnum, p.payload.size);
 
         T scratch;
         T *decoded = NULL;

@@ -654,7 +654,7 @@ Should NOT find anything (or should be =0)
 
 **Check in logs:**
 ```
-LOG_INFO("Received text msg from=0x%0x, id=0x%x, msg=%.*s", ...)
+LOG_INFO("Received text msg from=0x%x, id=0x%x, msg=%.*s", ...)
 ```
 
 ### Memory Monitoring Not Starting

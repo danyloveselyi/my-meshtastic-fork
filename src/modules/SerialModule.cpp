@@ -314,7 +314,7 @@ ProcessMessage SerialModuleRadio::handleReceived(const meshtastic_MeshPacket &mp
         }
 
         auto &p = mp.decoded;
-        // LOG_DEBUG("Received text msg self=0x%0x, from=0x%0x, to=0x%0x, id=%d, msg=%.*s",
+        // LOG_DEBUG("Received text msg self=0x%x, from=0x%x, to=0x%x, id=%d, msg=%.*s",
         //          nodeDB->getNodeNum(), mp.from, mp.to, mp.id, p.payload.size, p.payload.bytes);
 
         if (isFromUs(&mp)) {
