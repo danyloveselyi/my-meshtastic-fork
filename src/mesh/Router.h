@@ -62,6 +62,16 @@ class Router : protected concurrency::OSThread, protected PacketHistory
     /** Return Underlying interface's TX queue status */
     meshtastic_QueueStatus getQueueStatus();
 
+    /// Get network queue statistics for monitoring (safe read-only access)
+    int getFromRadioQueueSize() { return fromRadioQueue.numUsed(); }
+    int getFromRadioQueueFree() { return fromRadioQueue.numFree(); }
+
+    /// Get PacketHistory (DupeCache) statistics for monitoring
+    uint32_t getPacketCount() { return PacketHistory::getPacketCount(); }
+    uint32_t getOldestPacketAge() { return PacketHistory::getOldestPacketAge(); }
+    uint32_t getNewestPacketAge() { return PacketHistory::getNewestPacketAge(); }
+    uint32_t getAveragePacketAge() { return PacketHistory::getAveragePacketAge(); }
+
     /**
      * @return our local nodenum */
     NodeNum getNodeNum();

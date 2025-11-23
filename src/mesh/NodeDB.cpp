@@ -28,6 +28,11 @@
 #include <pb_encode.h>
 #include <vector>
 
+// dynamic_max_nodes defined in DynamicNodes.cpp with weak linkage
+// Variants can override by defining in variant.cpp
+extern const uint32_t DEFAULT_MAX_NODES;
+extern uint32_t dynamic_max_nodes;
+
 #ifdef ARCH_ESP32
 #if HAS_WIFI
 #include "mesh/wifi/WiFiAPClient.h"
@@ -1116,6 +1121,9 @@ void NodeDB::loadFromDisk()
     }
 
 #endif
+    // Pre-allocate vector space to avoid realloc during load (reduces peak memory usage)
+    nodeDatabase.nodes.reserve(dynamic_max_nodes);
+
     auto state = loadProto(nodeDatabaseFileName, getMaxNodesAllocatedSize(), sizeof(meshtastic_NodeDatabase),
                            &meshtastic_NodeDatabase_msg, &nodeDatabase);
     if (nodeDatabase.version < DEVICESTATE_MIN_VER) {
@@ -1458,6 +1466,17 @@ size_t NodeDB::getNumOnlineMeshNodes(bool localOnly)
     }
 
     return numseen;
+}
+
+size_t NodeDB::getNumValidMeshNodes()
+{
+    size_t count = 0;
+    for (int i = 0; i < numMeshNodes; i++) {
+        if (meshNodes->at(i).has_user) {
+            count++;
+        }
+    }
+    return count;
 }
 
 #include "MeshModule.h"

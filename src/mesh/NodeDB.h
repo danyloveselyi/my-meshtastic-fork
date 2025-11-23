@@ -219,6 +219,7 @@ class NodeDB
 
     virtual meshtastic_NodeInfoLite *getMeshNode(NodeNum n);
     size_t getNumMeshNodes() { return numMeshNodes; }
+    size_t getNumValidMeshNodes(); // Count actual non-empty node slots
 
     UserLicenseStatus getLicenseStatus(uint32_t nodeNum);
 
