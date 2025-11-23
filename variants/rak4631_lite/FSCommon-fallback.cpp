@@ -619,9 +619,9 @@ void fsInitExtended()
     LOG_INFO("Current millis(): %lu", millis());
     LOG_INFO("========================================");
     
-    // Инициализация расширенной filesystem для NodeDB (80 страниц, 320 KB)
-    // Основная filesystem остается на 7 страницах (28 KB) для конфигов
-    // Расширенная filesystem используется ТОЛЬКО для NodeDB (nodes.proto)
+    // Initialize extended filesystem for NodeDB (80 pages, 320 KB)
+    // Main filesystem remains on 7 pages (28 KB) for configs
+    // Extended filesystem is used ONLY for NodeDB (nodes.proto)
     #ifdef USE_EXTENDED_FS_FOR_NODEDB
     // Note: useExtendedFSForNodeDB() will call ExtendedNodeDBFS::init() which already logs initialization
     extern bool useExtendedFSForNodeDB();
@@ -633,10 +633,10 @@ void fsInitExtended()
     }
     #endif
     
-    // Тестовая filesystem на 80 страницах - ТЕСТИРОВАНИЕ БЕЗОПАСНО
-    // Основная filesystem остается на 7 страницах (безопасная)
-    // Тестовая filesystem создается на 80 страницах (0x80000) для диагностики
-    // Пока что отключено - требует custom framework с правильными константами
+    // Test filesystem on 80 pages - TESTING IS SAFE
+    // Main filesystem remains on 7 pages (safe)
+    // Test filesystem is created on 80 pages (0x80000) for diagnostics
+    // Currently disabled - requires custom framework with correct constants
     #ifdef TEST_80_PAGES_FILESYSTEM
     // test80PagesFilesystem(); // TODO: Requires custom framework with LFS_FLASH_ADDR = 0x80000
     LOG_INFO("TEST 80 PAGES FILESYSTEM: Placeholder - requires custom framework update");
@@ -645,12 +645,12 @@ void fsInitExtended()
 
 #ifdef TEST_80_PAGES_FILESYSTEM
 /**
- * @brief Тестирование filesystem на 80 страницах (ОТДЕЛЬНО от основной)
+ * @brief Test filesystem on 80 pages (SEPARATE from main)
  * 
- * БЕЗОПАСНО: Основная filesystem остается на 7 страницах
- * Тестовая filesystem создается на 80 страницах (0x80000 - 0xD0000)
+ * SAFE: Main filesystem remains on 7 pages
+ * Test filesystem is created on 80 pages (0x80000 - 0xD0000)
  * 
- * Цель: Диагностировать проблему с 80 страницами БЕЗ риска "убить" устройство
+ * Purpose: Diagnose 80-page problem WITHOUT risk of "bricking" the device
  */
 void test80PagesFilesystem()
 {
@@ -665,10 +665,10 @@ void test80PagesFilesystem()
     LOG_INFO("Do NOT use this for production!");
     LOG_INFO("========================================");
     
-    // Конфигурация тестовой filesystem (80 страниц)
+    // Test filesystem configuration (80 pages)
     constexpr uint32_t FLASH_NRF52_PAGE_SIZE = 4096;
     #ifdef NRF52840_XXAA
-        constexpr uint32_t TEST_LFS_FLASH_ADDR = 0x80000;  // После application
+        constexpr uint32_t TEST_LFS_FLASH_ADDR = 0x80000;  // After application
         constexpr uint32_t BOOTLOADER_ADDR = 0xF4000;  // NRF52840 bootloader
     #else
         constexpr uint32_t TEST_LFS_FLASH_ADDR = 0x6D000;  // Other NRF52 boards
@@ -686,7 +686,7 @@ void test80PagesFilesystem()
     LOG_INFO("  - End address: 0x%08X (page %u)", TEST_LFS_FLASH_ADDR + TEST_LFS_FLASH_TOTAL_SIZE - 1, (TEST_LFS_FLASH_ADDR + TEST_LFS_FLASH_TOTAL_SIZE - 1) / FLASH_NRF52_PAGE_SIZE);
     LOG_INFO("  - Bootloader start: 0x%08X (page %u)", BOOTLOADER_ADDR, BOOTLOADER_ADDR / FLASH_NRF52_PAGE_SIZE);
     
-    // Проверка безопасности
+    // Safety check
     uint32_t test_fs_end = TEST_LFS_FLASH_ADDR + TEST_LFS_FLASH_TOTAL_SIZE - 1;
     uint32_t gap_to_bootloader = BOOTLOADER_ADDR - test_fs_end - 1;
     bool overlap = (test_fs_end >= BOOTLOADER_ADDR);
@@ -715,7 +715,7 @@ void test80PagesFilesystem()
     LOG_INFO("TEST 1: Erase pages (80 pages)");
     LOG_INFO("========================================");
     
-    // Вычисляем диапазон страниц для стирания
+    // Calculate page range for erasing
     uint32_t first_page = TEST_LFS_FLASH_ADDR / FLASH_NRF52_PAGE_SIZE;
     uint32_t bootloader_page = BOOTLOADER_ADDR / FLASH_NRF52_PAGE_SIZE;
     uint32_t calculated_last_page = (TEST_LFS_FLASH_ADDR + TEST_LFS_FLASH_TOTAL_SIZE - 1) / FLASH_NRF52_PAGE_SIZE;
@@ -735,7 +735,7 @@ void test80PagesFilesystem()
         return;
     }
     
-    // Проверяем SoftDevice
+    // Check SoftDevice
     uint8_t sd_enabled = 0;
     uint32_t sd_check_result = sd_softdevice_is_enabled(&sd_enabled);
     bool use_async = (sd_check_result == NRF_SUCCESS && sd_enabled);

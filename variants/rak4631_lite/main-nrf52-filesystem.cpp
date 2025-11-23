@@ -221,24 +221,24 @@ static void eraseFilesystemPages()
 
 // Override preFSBegin() with MAXIMUM SAFE logging
 // 
-// БЕЗОПАСНЫЙ СЦЕНАРИЙ (пошаговый план диагностики):
+// SAFE SCENARIO (step-by-step diagnostic plan):
 // 
-// КРИТИЧЕСКИ ВАЖНО: Эта функция вызывается в fsInit() -> preFSBegin()
-// USB уже инициализирован (consoleInit() вызывается раньше в setup()),
-// НО полная инициализация USB может еще не завершиться!
+// CRITICALLY IMPORTANT: This function is called in fsInit() -> preFSBegin()
+// USB is already initialized (consoleInit() is called earlier in setup()),
+// BUT full USB initialization may not be complete yet!
 // 
-// БЕЗОПАСНЫЕ ПРАВИЛА:
-// 1. Минимальные операции (только проверка GPREGRET - быстро)
-// 2. Если нужен format - делаем ТОЛЬКО InternalFS.format() БЕЗ erase pages (быстро)
-// 3. НИКАКИХ длительных операций (erase pages) здесь!
-// 4. Все длительные операции (erase pages, проверка версии) в fsInitExtended() (после USB)
-// 5. Максимальное логирование для диагностики
+// SAFE RULES:
+// 1. Minimal operations (only GPREGRET check - fast)
+// 2. If format is needed - do ONLY InternalFS.format() WITHOUT erase pages (fast)
+// 3. NO long operations (erase pages) here!
+// 4. All long operations (erase pages, version check) in fsInitExtended() (after USB)
+// 5. Maximum logging for diagnostics
 //
 void preFSBegin()
 {
     static unsigned long millis_until_formatting_again = 0;
     
-    // БЕЗОПАСНО: Быстрая проверка регистров (не требует flash операций)
+    // SAFE: Fast register check (does not require flash operations)
     uint32_t reset_reason = NRF_POWER->RESETREAS;
     uint32_t gpregret = NRF_POWER->GPREGRET;
     
@@ -261,7 +261,7 @@ void preFSBegin()
     LOG_INFO("  - NRF52_MAGIC_LFS_IS_CORRUPT: 0x%02X", NRF52_MAGIC_LFS_IS_CORRUPT);
     LOG_INFO("  - millis_until_formatting_again: %lu", millis_until_formatting_again);
     
-    // Check GPREGRET corruption flag (БЫСТРО - только чтение регистров)
+    // Check GPREGRET corruption flag (FAST - register read only)
     bool is_warm_boot = (reset_reason == 0);
     bool is_corruption_flag = (gpregret == NRF52_MAGIC_LFS_IS_CORRUPT);
     
@@ -273,20 +273,20 @@ void preFSBegin()
         LOG_WARN("⚠️  GPREGRET corruption flag detected!");
         LOG_WARN("⚠️  CRITICAL: Checking which filesystem is corrupted...");
         
-        // КРИТИЧЕСКИ ВАЖНО: Проверить, какая файловая система повреждена!
-        // Extended filesystem может вызвать lfs_assert(), который установит GPREGRET,
-        // но это НЕ означает, что основная файловая система повреждена!
+        // CRITICALLY IMPORTANT: Check which filesystem is corrupted!
+        // Extended filesystem may trigger lfs_assert(), which sets GPREGRET,
+        // but this does NOT mean the main filesystem is corrupted!
         // 
-        // Проверяем основную файловую систему перед форматированием:
-        // 1. Пытаемся смонтировать основную файловую систему
-        // 2. Если монтирование успешно - основная FS НЕ повреждена, НЕ форматируем!
-        // 3. Если монтирование не удалось - основная FS повреждена, форматируем
+        // Check main filesystem before formatting:
+        // 1. Try to mount the main filesystem
+        // 2. If mount succeeds - main FS is NOT corrupted, do NOT format!
+        // 3. If mount fails - main FS is corrupted, format it
         
         LOG_INFO("Step 1: Attempting to mount MAIN filesystem to check if it's corrupted...");
         bool main_fs_corrupted = false;
         
-        // Пытаемся смонтировать основную файловую систему
-        // Если монтирование успешно - основная FS НЕ повреждена
+        // Try to mount the main filesystem
+        // If mount succeeds - main FS is NOT corrupted
         if (!InternalFS.begin()) {
             LOG_WARN("⚠️  MAIN filesystem mount FAILED - it IS corrupted!");
             LOG_WARN("⚠️  Will format MAIN filesystem (MINIMAL format, NO erase pages)");
@@ -305,9 +305,9 @@ void preFSBegin()
         LOG_INFO("  - millis_until_formatting_again set to: %lu", millis_until_formatting_again);
         
         if (main_fs_corrupted) {
-            // БЕЗОПАСНО: Быстрый format БЕЗ erase pages
-            // InternalFS.format() выполнит минимальное форматирование (быстро)
-            // Полный erase всех страниц будет в fsInitExtended() (после USB гарантированно готов)
+            // SAFE: Fast format WITHOUT erase pages
+            // InternalFS.format() will perform minimal formatting (fast)
+            // Full erase of all pages will be in fsInitExtended() (after USB is guaranteed ready)
             LOG_INFO("Calling InternalFS.format() (MINIMAL, FAST, NO ERASE PAGES)...");
             uint32_t format_start = millis();
             InternalFS.format();

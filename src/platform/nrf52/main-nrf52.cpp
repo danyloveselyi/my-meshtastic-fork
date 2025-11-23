@@ -151,7 +151,7 @@ inline void reportLittleFSCorruptionOnce()
 #ifndef RAK_4631_LITE_EXTENDED_FILESYSTEM
 void preFSBegin()
 {
-    // БЕЗОПАСНЫЙ СЦЕНАРИЙ: Минимальные операции (только GPREGRET проверка)
+    // SAFE SCENARIO: Minimal operations (only GPREGRET check)
     LOG_INFO("========================================");
     LOG_INFO("preFSBegin() START - STANDARD (7 pages)");
     LOG_INFO("========================================");
