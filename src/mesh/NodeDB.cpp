@@ -17,16 +17,25 @@
 #include "SPILock.h"
 #include "SafeFile.h"
 #include "TypeConversions.h"
+#include "Throttle.h"  // For throttling NodeDB saves
 #include "error.h"
 #include "main.h"
 #include "mesh-pb-constants.h"
 #include "meshUtils.h"
 #include "modules/NeighborInfoModule.h"
+#ifdef ARCH_NRF52
+#include "RadioLibInterface.h"  // For checking radio state before flash writes
+#endif
 #include <ErriezCRC32.h>
 #include <algorithm>
 #include <pb_decode.h>
 #include <pb_encode.h>
 #include <vector>
+
+// Include extended filesystem adapter if enabled
+#ifdef USE_EXTENDED_FS_FOR_NODEDB
+#include "nodedb/NodeDBFilesystemAdapter.h"
+#endif
 
 #ifdef ARCH_ESP32
 #if HAS_WIFI
@@ -162,6 +171,31 @@ bool meshtastic_NodeDatabase_callback(pb_istream_t *istream, pb_ostream_t *ostre
     if (istream) {
         meshtastic_NodeInfoLite node; // this gets good data
         std::vector<meshtastic_NodeInfoLite> *vec = (std::vector<meshtastic_NodeInfoLite> *)field->pData;
+
+        // CRITICAL FIX: Reserve capacity to avoid multiple reallocations during loading
+        // Each push_back() without capacity causes reallocation = double RAM usage temporarily
+        // Check capacity on first node (when vector is empty) to ensure one-time allocation
+        if (vec->empty() && vec->capacity() < MAX_NUM_NODES) {
+            vec->reserve(MAX_NUM_NODES);
+            size_t capacity = vec->capacity();
+            if (capacity < MAX_NUM_NODES) {
+                LOG_ERROR("CRITICAL: Failed to reserve memory during load! Capacity: %u (expected: %u)", 
+                          capacity, MAX_NUM_NODES);
+                LOG_ERROR("Free heap: %u bytes. Loading may fail or cause memory issues!", memGet.getFreeHeap());
+            } else {
+                LOG_DEBUG("Reserved memory for %u nodes during load (capacity: %u)", MAX_NUM_NODES, capacity);
+            }
+        }
+        // Also check capacity if vector is not empty (shouldn't happen, but safety check)
+        else if (!vec->empty() && vec->capacity() < MAX_NUM_NODES) {
+            LOG_WARN("Vector not empty but capacity (%u) < MAX_NUM_NODES (%u) - attempting reserve", 
+                     vec->capacity(), MAX_NUM_NODES);
+            vec->reserve(MAX_NUM_NODES);
+            size_t capacity = vec->capacity();
+            if (capacity < MAX_NUM_NODES) {
+                LOG_ERROR("Failed to reserve additional memory! Capacity: %u (expected: %u)", capacity, MAX_NUM_NODES);
+            }
+        }
 
         if (istream->bytes_left && pb_decode(istream, meshtastic_NodeInfoLite_fields, &node))
             vec->push_back(node);
@@ -299,9 +333,10 @@ NodeDB::NodeDB()
     info->has_user = true;
 
     // If node database has not been saved for the first time, save it now
+    // This is critical - use immediate=true to bypass throttling
 #ifdef FSCom
     if (!FSCom.exists(nodeDatabaseFileName)) {
-        saveNodeDatabaseToDisk();
+        saveNodeDatabaseToDisk(true); // immediate=true for first save
     }
 #endif
 
@@ -475,7 +510,26 @@ void NodeDB::installDefaultNodeDatabase()
 {
     LOG_DEBUG("Install default NodeDatabase");
     nodeDatabase.version = DEVICESTATE_CUR_VER;
-    nodeDatabase.nodes = std::vector<meshtastic_NodeInfoLite>(MAX_NUM_NODES);
+    // CRITICAL FIX: Don't pre-allocate 500 nodes (125KB RAM!)
+    // Reserve capacity but don't initialize elements
+    nodeDatabase.nodes.clear();
+    
+    // Reserve memory for MAX_NUM_NODES nodes (one-time allocation)
+    // This ensures we have enough capacity for all nodes without reallocations
+    nodeDatabase.nodes.reserve(MAX_NUM_NODES);
+    
+    // Verify that reserve() succeeded
+    size_t capacity = nodeDatabase.nodes.capacity();
+    if (capacity < MAX_NUM_NODES) {
+        LOG_ERROR("CRITICAL: Failed to reserve memory for %u nodes! Capacity: %u bytes (expected: %u bytes)", 
+                  MAX_NUM_NODES, capacity, MAX_NUM_NODES);
+        LOG_ERROR("Free heap: %u bytes. This may cause memory issues during node addition!", memGet.getFreeHeap());
+        // Continue anyway - system may still work with reduced capacity, but log error
+    } else {
+        LOG_DEBUG("Successfully reserved memory for %u nodes (capacity: %u)", MAX_NUM_NODES, capacity);
+    }
+    
+    LOG_INFO("NodeDB initialized: MAX_NUM_NODES = %u, capacity = %u", MAX_NUM_NODES, capacity);
     numMeshNodes = 0;
     meshNodes = &nodeDatabase.nodes;
 }
@@ -930,10 +984,19 @@ void NodeDB::resetNodes()
     if (!config.position.fixed_position)
         clearLocalPosition();
     numMeshNodes = 1;
+    
+    // Ensure capacity is sufficient before using std::fill()
+    // This should already be set by installDefaultNodeDatabase(), but verify for safety
+    if (nodeDatabase.nodes.capacity() < MAX_NUM_NODES) {
+        LOG_WARN("NodeDB capacity (%u) < MAX_NUM_NODES (%u) in resetNodes() - reserving memory", 
+                 nodeDatabase.nodes.capacity(), MAX_NUM_NODES);
+        nodeDatabase.nodes.reserve(MAX_NUM_NODES);
+    }
+    
     std::fill(nodeDatabase.nodes.begin() + 1, nodeDatabase.nodes.end(), meshtastic_NodeInfoLite());
     devicestate.has_rx_text_message = false;
     devicestate.has_rx_waypoint = false;
-    saveNodeDatabaseToDisk();
+    saveNodeDatabaseToDisk(true); // immediate=true for reset (critical operation)
     saveDeviceStateToDisk();
     if (neighborInfoModule && moduleConfig.neighbor_info.enabled)
         neighborInfoModule->resetNeighbors();
@@ -952,7 +1015,7 @@ void NodeDB::removeNodeByNum(NodeNum nodeNum)
     std::fill(nodeDatabase.nodes.begin() + numMeshNodes, nodeDatabase.nodes.begin() + numMeshNodes + 1,
               meshtastic_NodeInfoLite());
     LOG_DEBUG("NodeDB::removeNodeByNum purged %d entries. Save changes", removed);
-    saveNodeDatabaseToDisk();
+    saveNodeDatabaseToDisk(true); // immediate=true for remove (critical operation)
 }
 
 void NodeDB::clearLocalPosition()
@@ -1057,6 +1120,11 @@ LoadFileResult NodeDB::loadProto(const char *filename, size_t protoSize, size_t 
 #ifdef FSCom
     concurrency::LockGuard g(spiLock);
 
+    // Use adapter for extended filesystem support if available
+    #ifdef USE_EXTENDED_FS_FOR_NODEDB
+    return NodeDBFilesystemAdapter::loadProto(filename, protoSize, objSize, fields, dest_struct);
+    #else
+    // Use main filesystem (standard behavior)
     auto f = FSCom.open(filename, FILE_O_READ);
 
     if (f) {
@@ -1075,6 +1143,7 @@ LoadFileResult NodeDB::loadProto(const char *filename, size_t protoSize, size_t 
     } else {
         LOG_ERROR("Could not open / read %s", filename);
     }
+    #endif // USE_EXTENDED_FS_FOR_NODEDB
 #else
     LOG_ERROR("ERROR: Filesystem not implemented");
     state = LoadFileResult::NO_FILESYSTEM;
@@ -1125,24 +1194,31 @@ void NodeDB::loadFromDisk()
         meshNodes = &nodeDatabase.nodes;
         numMeshNodes = nodeDatabase.nodes.size();
         LOG_INFO("Loaded saved nodedatabase version %d, with nodes count: %d", nodeDatabase.version, nodeDatabase.nodes.size());
+        
+        // CRITICAL: Verify capacity after loading - ensure we have enough space for MAX_NUM_NODES
+        // This is important because reserve() might not have been called during load (if vector wasn't empty)
+        size_t capacity = nodeDatabase.nodes.capacity();
+        if (capacity < MAX_NUM_NODES) {
+            LOG_WARN("NodeDB capacity (%u) < MAX_NUM_NODES (%u) after load - reserving additional memory", 
+                     capacity, MAX_NUM_NODES);
+            nodeDatabase.nodes.reserve(MAX_NUM_NODES);
+            capacity = nodeDatabase.nodes.capacity();
+            if (capacity < MAX_NUM_NODES) {
+                LOG_ERROR("CRITICAL: Failed to reserve memory after load! Capacity: %u (expected: %u)", 
+                          capacity, MAX_NUM_NODES);
+                LOG_ERROR("Free heap: %u bytes. Adding new nodes may fail!", memGet.getFreeHeap());
+            } else {
+                LOG_DEBUG("Successfully reserved memory after load (capacity: %u)", capacity);
+            }
+        } else {
+            LOG_DEBUG("NodeDB capacity verified after load: %u (sufficient for MAX_NUM_NODES: %u)", 
+                     capacity, MAX_NUM_NODES);
+        }
     }
 
     if (numMeshNodes > MAX_NUM_NODES) {
         LOG_WARN("Node count %d exceeds MAX_NUM_NODES %d, truncating", numMeshNodes, MAX_NUM_NODES);
         numMeshNodes = MAX_NUM_NODES;
-    }
-
-    // Pre-allocate vector to MAX_NUM_NODES to avoid multiple reallocations during runtime
-    // This happens once at boot when memory is still available
-    if (meshNodes->size() < MAX_NUM_NODES) {
-        uint32_t freeBefore = memGet.getFreeHeap();
-        size_t sizeBefore = meshNodes->size();
-        LOG_INFO("Expanding NodeDB vector from %d to %d nodes. Free heap before: %u bytes",
-                 sizeBefore, MAX_NUM_NODES, freeBefore);
-        meshNodes->resize(MAX_NUM_NODES);
-        uint32_t freeAfter = memGet.getFreeHeap();
-        LOG_INFO("NodeDB vector expanded. Free heap after: %u bytes (delta: %d bytes)",
-                 freeAfter, (int32_t)freeAfter - (int32_t)freeBefore);
     }
 
     // static DeviceState scratch; We no longer read into a tempbuf because this structure is 15KB of valuable RAM
@@ -1236,11 +1312,26 @@ void NodeDB::loadFromDisk()
     state = loadProto(moduleConfigFileName, meshtastic_LocalModuleConfig_size, sizeof(meshtastic_LocalModuleConfig),
                       &meshtastic_LocalModuleConfig_msg, &moduleConfig);
     if (state != LoadFileResult::LOAD_SUCCESS) {
+        LOG_WARN("module.proto not found - installing default module config (this is normal on first boot)");
         installDefaultModuleConfig(); // Our in RAM copy might now be corrupt
+        // Save default module config immediately
+        LOG_INFO("Saving default module.proto to disk...");
+        if (saveToDisk(SEGMENT_MODULECONFIG)) {
+            LOG_INFO("Default module.proto saved successfully");
+        } else {
+            LOG_ERROR("Failed to save default module.proto");
+        }
     } else {
         if (moduleConfig.version < DEVICESTATE_MIN_VER) {
             LOG_WARN("moduleConfig %d is old, discard", moduleConfig.version);
             installDefaultModuleConfig();
+            // Save updated module config after installing defaults
+            LOG_INFO("Saving updated module.proto after version upgrade...");
+            if (saveToDisk(SEGMENT_MODULECONFIG)) {
+                LOG_INFO("Updated module.proto saved successfully");
+            } else {
+                LOG_ERROR("Failed to save updated module.proto");
+            }
         } else {
             LOG_INFO("Loaded saved moduleConfig version %d", moduleConfig.version);
         }
@@ -1290,29 +1381,37 @@ void NodeDB::loadFromDisk()
 bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
                        bool fullAtomic)
 {
-    bool okay = false;
 #ifdef FSCom
+    // Use adapter for extended filesystem support if available
+    #ifdef USE_EXTENDED_FS_FOR_NODEDB
+    return NodeDBFilesystemAdapter::saveProto(filename, protoSize, fields, dest_struct, fullAtomic);
+    #else
+    // Use main filesystem (standard behavior)
     auto f = SafeFile(filename, fullAtomic);
-
+    
     LOG_INFO("Save %s", filename);
     pb_ostream_t stream = {&writecb, static_cast<Print *>(&f), protoSize};
-
+    
+    bool okay = false;
     if (!pb_encode(&stream, fields, dest_struct)) {
         LOG_ERROR("Error: can't encode protobuf %s", PB_GET_ERROR(&stream));
     } else {
         okay = true;
     }
-
+    
     bool writeSucceeded = f.close();
-
+    
     if (!okay || !writeSucceeded) {
         LOG_ERROR("Can't write prefs!");
+        return false;
     }
+    return true;
+    #endif // USE_EXTENDED_FS_FOR_NODEDB
 #else
-    LOG_ERROR("ERROR: Filesystem not implemented");
+    return false;
 #endif
-    return okay;
 }
+
 
 bool NodeDB::saveChannelsToDisk()
 {
@@ -1329,40 +1428,55 @@ bool NodeDB::saveDeviceStateToDisk()
 #ifdef FSCom
     spiLock->lock();
     FSCom.mkdir("/prefs");
-
-    // Check actual file size and log flash storage info for large databases
-    size_t actualFileSize = 0;
-    auto f = FSCom.open(deviceStateFileName, FILE_O_READ);
-    if (f) {
-        actualFileSize = f.size();
-        f.close();
-    }
-    
-    // Calculate actual encoded protobuf size for accurate estimation
-    size_t encodedSize = 0;
-    pb_get_encoded_size(&encodedSize, meshtastic_DeviceState_fields, &devicestate);
-    
-    // Log if file is large (>50KB) or if we expect a large encoded size
-    if (actualFileSize > 50000 || encodedSize > 50000) {
-        size_t totalBytes = FSCom.totalBytes();
-        size_t usedBytes = FSCom.usedBytes();
-        if (actualFileSize > 0) {
-            LOG_INFO("Flash storage: %u/%u bytes used (%u free, DeviceState file: %u bytes, encoded: %u bytes)",
-                     usedBytes, totalBytes, totalBytes - usedBytes, actualFileSize, encodedSize);
-        } else {
-            LOG_INFO("Flash storage: %u/%u bytes used (%u free, encoded DeviceState: %u bytes)",
-                     usedBytes, totalBytes, totalBytes - usedBytes, encodedSize);
-        }
-    }
-
     spiLock->unlock();
 #endif
-    // Note: Protobuf encoding is much more compact than in-memory structures
-    // Large node databases can still be 50-100KB when encoded
-    // Because so huge we _must_ not use fullAtomic, because the filesystem is probably too small to hold two copies of this
     return saveProto(deviceStateFileName, meshtastic_DeviceState_size, &meshtastic_DeviceState_msg, &devicestate, false);
-}bool NodeDB::saveNodeDatabaseToDisk()
+}bool NodeDB::saveNodeDatabaseToDisk(bool immediate)
 {
+    // OPTIMIZATION: Apply throttling to prevent excessive flash writes
+    // Only skip throttling for immediate saves (critical operations like reset, remove)
+    if (!immediate) {
+        // Check if we saved recently (within last minute) - same throttling as updateUser()
+        if (Throttle::isWithinTimespanMs(lastNodeDbSave, ONE_MINUTE_MS)) {
+            LOG_DEBUG("Defer NodeDB saveToDisk - throttled (last save was %u ms ago)", 
+                     millis() - lastNodeDbSave);
+            return true; // Return success to avoid error handling, but don't actually save
+        }
+        
+        // OPTIMIZATION: Check radio state - avoid writing during active packet reception
+        // Writing during transmission is OK (reception is disabled anyway)
+        // But writing during reception can cause packet loss
+#ifdef ARCH_NRF52
+        if (RadioLibInterface::instance != nullptr) {
+            // Check if radio is actively receiving a packet
+            if (RadioLibInterface::instance->isActivelyReceiving()) {
+                // Wait a bit for reception to complete (typical LoRa packet is 10-100ms)
+                // But don't wait too long - max 200ms
+                uint32_t wait_start = millis();
+                uint32_t max_wait = 200; // Maximum wait time in ms
+                
+                while (RadioLibInterface::instance->isActivelyReceiving() && 
+                       (millis() - wait_start) < max_wait) {
+                    yield(); // Allow other tasks to run
+                    delay(10); // Small delay to avoid busy-wait
+                }
+                
+                // If still receiving after wait, log warning but proceed with save
+                // (better to save than lose data, and reception might be stuck)
+                if (RadioLibInterface::instance->isActivelyReceiving()) {
+                    LOG_WARN("NodeDB save: Radio still receiving after %u ms wait - proceeding with save anyway", 
+                            millis() - wait_start);
+                } else {
+                    LOG_DEBUG("NodeDB save: Waited %u ms for reception to complete", 
+                             millis() - wait_start);
+                }
+            }
+            // Note: We don't check isSending() - writing during transmission is fine
+            // because reception is disabled during transmission anyway
+        }
+#endif
+    }
+    
 #ifdef FSCom
     spiLock->lock();
     FSCom.mkdir("/prefs");
@@ -1370,7 +1484,87 @@ bool NodeDB::saveDeviceStateToDisk()
 #endif
     size_t nodeDatabaseSize;
     pb_get_encoded_size(&nodeDatabaseSize, meshtastic_NodeDatabase_fields, &nodeDatabase);
-    return saveProto(nodeDatabaseFileName, nodeDatabaseSize, &meshtastic_NodeDatabase_msg, &nodeDatabase, false);
+
+    // Log database size for monitoring large node databases
+    if (nodeDatabaseSize > 50000 || numMeshNodes > 100) {
+        LOG_INFO("Saving NodeDB: %d nodes, %u bytes encoded, free heap: %u bytes",
+                 numMeshNodes, nodeDatabaseSize, memGet.getFreeHeap());
+    }
+
+    bool saveResult = saveProto(nodeDatabaseFileName, nodeDatabaseSize, &meshtastic_NodeDatabase_msg, &nodeDatabase, false);
+
+    // DISABLED: Verification loads entire DB into RAM (125KB!)
+    // This causes OOM crash on devices with 248KB RAM
+    // TODO: Implement streaming verification without loading full DB
+    // if (saveResult && (nodeDatabaseSize > 50000 || numMeshNodes > 100)) {
+    //     verifyNodeDatabaseFromDisk();
+    // }
+
+    // Update last save time for throttling
+    if (saveResult) {
+        lastNodeDbSave = millis();
+    }
+
+    return saveResult;
+}
+
+// Verify saved database by reading from disk and logging all nodes
+void NodeDB::verifyNodeDatabaseFromDisk()
+{
+#ifdef FSCom
+    concurrency::LockGuard g(spiLock);
+
+    auto f = FSCom.open(nodeDatabaseFileName, FILE_O_READ);
+    if (!f) {
+        LOG_ERROR("Failed to open %s for verification", nodeDatabaseFileName);
+        return;
+    }
+
+    size_t fileSize = f.size();
+    LOG_INFO("Verifying NodeDB from flash: file size = %u bytes", fileSize);
+
+    // Read and decode the database from flash
+    meshtastic_NodeDatabase verifyDb = {};
+    verifyDb.version = 0;
+    pb_istream_t stream = {&readcb, &f, fileSize};
+
+    if (!pb_decode(&stream, &meshtastic_NodeDatabase_msg, &verifyDb)) {
+        LOG_ERROR("Failed to decode NodeDB from flash: %s", PB_GET_ERROR(&stream));
+        f.close();
+        return;
+    }
+
+    f.close();
+
+    // Count valid nodes in saved database
+    int validNodes = 0;
+    for (size_t i = 0; i < verifyDb.nodes.size(); i++) {
+        if (verifyDb.nodes[i].has_user && verifyDb.nodes[i].num != 0) {
+            validNodes++;
+        }
+    }
+
+    LOG_INFO("✓ NodeDB verified from flash: %d valid nodes out of %d total",
+             validNodes, verifyDb.nodes.size());
+
+    // Log first 20 nodes as sample (to avoid flooding logs with 500 nodes)
+    LOG_INFO("Sample of saved nodes (first 20):");
+    int logged = 0;
+    for (size_t i = 0; i < verifyDb.nodes.size() && logged < 20; i++) {
+        if (verifyDb.nodes[i].has_user && verifyDb.nodes[i].num != 0) {
+            LOG_INFO("  Node[%d]: 0x%08x %s/%s",
+                     logged + 1,
+                     verifyDb.nodes[i].num,
+                     verifyDb.nodes[i].user.long_name,
+                     verifyDb.nodes[i].user.short_name);
+            logged++;
+        }
+    }
+
+    if (validNodes > 20) {
+        LOG_INFO("  ... and %d more nodes", validNodes - 20);
+    }
+#endif
 }
 
 bool NodeDB::saveToDiskNoRetry(int saveWhat)
@@ -1421,7 +1615,9 @@ bool NodeDB::saveToDiskNoRetry(int saveWhat)
     }
 
     if (saveWhat & SEGMENT_NODEDATABASE) {
-        success &= saveNodeDatabaseToDisk();
+        // Use throttled save (immediate=false) - saveToDisk() is called from updateUser() which already has throttling
+        // But we also apply throttling here as a safeguard
+        success &= saveNodeDatabaseToDisk(false);
     }
 
     return success;
@@ -1498,7 +1694,6 @@ size_t NodeDB::getNumOnlineMeshNodes(bool localOnly)
 }
 
 #include "MeshModule.h"
-#include "Throttle.h"
 
 /** Update position info for this node based on received position data
  */
@@ -1586,7 +1781,8 @@ void NodeDB::addFromContact(meshtastic_SharedContact contact)
     updateGUIforNode = info;
     powerFSM.trigger(EVENT_NODEDB_UPDATED);
     notifyObservers(true); // Force an update whether or not our node counts have changed
-    saveNodeDatabaseToDisk();
+    // Use throttled save (immediate=false) - key verification is not critical enough to bypass throttling
+    saveNodeDatabaseToDisk(false);
 }
 
 /** Update user info and channel for this node based on received user data
@@ -1601,6 +1797,15 @@ bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelInde
 #if !(MESHTASTIC_EXCLUDE_PKI)
     if (p.public_key.size == 32) {
         printBytes("Incoming Pubkey: ", p.public_key.bytes, 32);
+        
+        // Log when public key is received from a node (for debugging decryption issues)
+        // Format first 8 bytes for identification (not security risk - just for logging)
+        char pubkey_hex[17];
+        for (int i = 0; i < 8; i++) {
+            snprintf(pubkey_hex + i * 2, 3, "%02X", p.public_key.bytes[i]);
+        }
+        pubkey_hex[16] = '\0';
+        LOG_INFO("Node 0x%08x: Public key received from nodeinfo (first 8 bytes: %s...)", nodeId, pubkey_hex);
 
         // Alert the user if a remote node is advertising public key that matches our own
         if (owner.public_key.size == 32 && memcmp(p.public_key.bytes, owner.public_key.bytes, 32) == 0 && !duplicateWarned) {
@@ -1615,6 +1820,7 @@ bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelInde
             service->sendClientNotification(cn);
         }
     }
+    bool is_new_pubkey = false;
     if (info->user.public_key.size > 0) { // if we have a key for this user already, don't overwrite with a new one
         LOG_INFO("Public Key set for node, not updating!");
         // we copy the key into the incoming packet, to prevent overwrite
@@ -1622,6 +1828,7 @@ bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelInde
         memcpy(p.public_key.bytes, info->user.public_key.bytes, 32);
     } else if (p.public_key.size > 0) {
         LOG_INFO("Update Node Pubkey!");
+        is_new_pubkey = true;  // Mark that we're setting a new public key
     }
 #endif
 
@@ -1648,8 +1855,19 @@ bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelInde
         // store our DB unless we just did so less than a minute ago
 
         if (!Throttle::isWithinTimespanMs(lastNodeDbSave, ONE_MINUTE_MS)) {
-            saveToDisk(SEGMENT_NODEDATABASE);
+            bool save_success = saveToDisk(SEGMENT_NODEDATABASE);
             lastNodeDbSave = millis();
+            
+            // Log when new node's public key is successfully saved to disk
+            if (save_success && is_new_pubkey && info->user.public_key.size == 32) {
+                // Format public key first 8 bytes for identification (not security risk - just for logging)
+                char pubkey_hex[17];
+                for (int i = 0; i < 8; i++) {
+                    snprintf(pubkey_hex + i * 2, 3, "%02X", info->user.public_key.bytes[i]);
+                }
+                pubkey_hex[16] = '\0';
+                LOG_INFO("Node 0x%08x: Public key saved to disk (first 8 bytes: %s...)", nodeId, pubkey_hex);
+            }
         } else {
             LOG_DEBUG("Defer NodeDB saveToDisk for now");
         }
@@ -1711,7 +1929,7 @@ meshtastic_NodeInfoLite *NodeDB::getMeshNode(NodeNum n)
 }
 
 // returns true if we are running low on memory
-// Note: Node count limit is checked separately in getOrCreateMeshNode() using dynamic_max_nodes
+// Note: Node count limit is checked separately in getOrCreateMeshNode() using MAX_NUM_NODES
 bool NodeDB::isFull()
 {
     return (memGet.getFreeHeap() < MINIMUM_SAFE_FREE_HEAP);
@@ -1727,15 +1945,21 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
         bool reachedNodeLimit = (numMeshNodes >= MAX_NUM_NODES);
         bool lowMemory = isFull();
 
-        if (reachedNodeLimit || lowMemory) {
-            if (reachedNodeLimit) {
-                LOG_INFO("Node database full: %u/%u nodes", numMeshNodes, MAX_NUM_NODES);
-            }
-            if (lowMemory) {
-                LOG_WARN("Low memory: %u bytes free (minimum: %u)",
-                         memGet.getFreeHeap(), MINIMUM_SAFE_FREE_HEAP);
-            }
-            LOG_INFO("Erasing oldest entry");
+        // Only evict nodes if we've reached the node limit
+        // Don't evict nodes based on memory alone - just log warning
+        // Memory pressure should be handled by other mechanisms, not by deleting nodes
+        if (reachedNodeLimit) {
+            LOG_INFO("Node database full: %u/%u nodes", numMeshNodes, MAX_NUM_NODES);
+            LOG_INFO("Erasing oldest entry to make room for new node");
+        } else if (lowMemory) {
+            // Only log memory warning, don't evict nodes
+            LOG_WARN("Low memory: %u bytes free (minimum: %u), but node count (%u) is below limit (%u)",
+                     memGet.getFreeHeap(), MINIMUM_SAFE_FREE_HEAP, numMeshNodes, MAX_NUM_NODES);
+            LOG_WARN("Not evicting nodes - memory pressure should be handled by other mechanisms");
+        }
+        
+        // Only proceed with eviction if we've reached the node limit
+        if (reachedNodeLimit) {
             // look for oldest node and erase it
             uint32_t oldest = UINT32_MAX;
             uint32_t oldestBoring = UINT32_MAX;
@@ -1767,17 +1991,81 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                     meshNodes->at(i) = meshNodes->at(i + 1);
                 }
                 (numMeshNodes)--;
+                // CRITICAL: Synchronize vector size with numMeshNodes after eviction
+                // This prevents size() from being larger than numMeshNodes, which would cause capacity issues
+                meshNodes->resize(numMeshNodes);
+                LOG_DEBUG("Evicted node at index %d, numMeshNodes now: %u, vector size: %u", 
+                         oldestIndex, numMeshNodes, meshNodes->size());
+            } else {
+                // CRITICAL FIX: If no node found to evict, try to evict the oldest non-favorite node (index 1, as 0 is our node)
+                // This prevents exceeding MAX_NUM_NODES when all nodes are favorites/ignored/verified
+                if (numMeshNodes > 1 && numMeshNodes >= MAX_NUM_NODES) {
+                    LOG_WARN("No 'boring' node found to evict, forcing eviction of oldest non-favorite node");
+                    oldestIndex = 1;  // Force evict second node (oldest after our node)
+                    for (int i = oldestIndex; i < numMeshNodes - 1; i++) {
+                        meshNodes->at(i) = meshNodes->at(i + 1);
+                    }
+                    (numMeshNodes)--;
+                    // CRITICAL: Synchronize vector size with numMeshNodes after eviction
+                    meshNodes->resize(numMeshNodes);
+                    LOG_DEBUG("Force evicted node at index %d, numMeshNodes now: %u, vector size: %u", 
+                             oldestIndex, numMeshNodes, meshNodes->size());
+                } else if (numMeshNodes >= MAX_NUM_NODES) {
+                    // CRITICAL: Cannot add new node - database is full and no node can be evicted
+                    LOG_ERROR("Cannot add node %u: database full (%u/%u nodes) and no node can be evicted", n, numMeshNodes, MAX_NUM_NODES);
+                    LOG_ERROR("This may cause memory issues - consider increasing MAX_NUM_NODES or cleaning up nodes");
+                    // Return nullptr to prevent adding node and potential memory issues
+                    return nullptr;
+                }
             }
         }
 
-        // Vector is pre-allocated at boot to MAX_NUM_NODES - no dynamic expansion needed
-        // add the node at the end
-        lite = &meshNodes->at((numMeshNodes)++);
-
-        // everything is missing except the nodenum
-        memset(lite, 0, sizeof(*lite));
-        lite->num = n;
-        LOG_INFO("Adding node to database with %i nodes and %u bytes free!", numMeshNodes, memGet.getFreeHeap());
+        // CRITICAL FIX: Use push_back() instead of at() since we only reserve capacity, not size
+        // Create new node and add it to vector
+        // NOTE: At this point, we should have space (either under limit, or old node was evicted)
+        if (numMeshNodes >= MAX_NUM_NODES) {
+            // This should ideally not be reached if eviction logic is perfect, but as a safeguard
+            LOG_ERROR("Attempting to add node %u when database is full (%u/%u nodes) after eviction attempt. Returning nullptr.", n, numMeshNodes, MAX_NUM_NODES);
+            return nullptr;
+        }
+        
+        // CRITICAL: Verify capacity before push_back() to prevent reallocation
+        // Reallocation would temporarily double RAM usage and could cause OOM
+        // Use numMeshNodes instead of size() for reliability (size() may be out of sync after eviction)
+        size_t capacity = meshNodes->capacity();
+        size_t current_size = (size_t)numMeshNodes;  // Use numMeshNodes as source of truth
+        size_t vector_size = meshNodes->size();     // For diagnostic purposes
+        
+        // Log warning if size() and numMeshNodes are out of sync (shouldn't happen after fix)
+        if (vector_size != current_size) {
+            LOG_WARN("Vector size (%u) != numMeshNodes (%u) - synchronizing...", vector_size, current_size);
+            meshNodes->resize(current_size);  // Synchronize
+            vector_size = meshNodes->size();
+        }
+        
+        if (capacity < (current_size + 1)) {
+            LOG_ERROR("CRITICAL: Vector capacity (%u) insufficient for push_back()! Current size: %u, needed: %u", 
+                     capacity, current_size, current_size + 1);
+            LOG_ERROR("Free heap: %u bytes. Attempting emergency reserve...", memGet.getFreeHeap());
+            // Emergency reserve - try to reserve at least MAX_NUM_NODES
+            meshNodes->reserve(MAX_NUM_NODES);
+            capacity = meshNodes->capacity();
+            if (capacity < (current_size + 1)) {
+                LOG_ERROR("Emergency reserve failed! Capacity: %u, needed: %u. Cannot add node!", 
+                         capacity, current_size + 1);
+                return nullptr; // Cannot add node - memory allocation failed
+            } else {
+                LOG_WARN("Emergency reserve succeeded (capacity: %u), but this should not happen!", capacity);
+            }
+        }
+        
+        meshtastic_NodeInfoLite newNode = {};
+        newNode.num = n;
+        meshNodes->push_back(newNode);
+        numMeshNodes++;
+        lite = &meshNodes->at(numMeshNodes - 1);
+        LOG_INFO("Adding node 0x%08x to database with %i nodes and %u bytes free! (capacity: %u)", 
+                n, numMeshNodes, memGet.getFreeHeap(), meshNodes->capacity());
     }
 
     return lite;

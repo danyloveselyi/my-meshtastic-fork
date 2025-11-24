@@ -12,6 +12,11 @@
 #include "SPILock.h"
 #include "configuration.h"
 
+#if defined(ARCH_NRF52) && defined(USE_EXTENDED_FS_FOR_NODEDB)
+// Forward declaration for extended filesystem initialization
+extern "C" void initExtendedFilesystemForNodeDB();
+#endif
+
 // Software SPI is used by MUI so disable SD card here until it's also implemented
 #if defined(HAS_SDCARD) && !defined(SDCARD_USE_SOFT_SPI)
 #include <SD.h>
@@ -293,6 +298,10 @@ void fsInit()
         LOG_ERROR("Filesystem mount failed");
         // assert(0); This auto-formats the partition, so no need to fail here.
     }
+#if defined(ARCH_NRF52) && defined(USE_EXTENDED_FS_FOR_NODEDB)
+    // Initialize extended filesystem for NodeDB if enabled
+    initExtendedFilesystemForNodeDB();
+#endif
 #if defined(ARCH_ESP32)
     LOG_DEBUG("Filesystem files (%d/%d Bytes):", FSCom.usedBytes(), FSCom.totalBytes());
 #else
