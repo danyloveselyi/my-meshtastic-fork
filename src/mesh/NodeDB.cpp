@@ -17,6 +17,9 @@
 #include "SPILock.h"
 #include "SafeFile.h"
 #include "TypeConversions.h"
+#ifdef USE_EXTENDED_FS_FOR_NODEDB
+#include "nodedb/NodeDBFilesystemAdapter.h"  // Variant-specific radio state checking
+#endif
 #include "error.h"
 #include "main.h"
 #include "mesh-pb-constants.h"
@@ -1053,6 +1056,11 @@ void NodeDB::pickNewNodeNum()
 LoadFileResult NodeDB::loadProto(const char *filename, size_t protoSize, size_t objSize, const pb_msgdesc_t *fields,
                                  void *dest_struct)
 {
+#ifdef USE_EXTENDED_FS_FOR_NODEDB
+    // Use variant-specific implementation with extended FS support
+    return NodeDBFilesystemAdapter::loadProto(filename, protoSize, objSize, fields, dest_struct);
+#else
+    // Standard implementation for variants without extended FS
     LoadFileResult state = LoadFileResult::OTHER_FAILURE;
 #ifdef FSCom
     concurrency::LockGuard g(spiLock);
@@ -1080,6 +1088,7 @@ LoadFileResult NodeDB::loadProto(const char *filename, size_t protoSize, size_t 
     state = LoadFileResult::NO_FILESYSTEM;
 #endif
     return state;
+#endif
 }
 
 void NodeDB::loadFromDisk()
@@ -1278,13 +1287,18 @@ void NodeDB::loadFromDisk()
 bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
                        bool fullAtomic)
 {
-    bool okay = false;
+#ifdef USE_EXTENDED_FS_FOR_NODEDB
+    // Use variant-specific implementation with extended FS support
+    return NodeDBFilesystemAdapter::saveProto(filename, protoSize, fields, dest_struct, fullAtomic);
+#else
+    // Standard implementation for variants without extended FS
 #ifdef FSCom
     auto f = SafeFile(filename, fullAtomic);
 
     LOG_INFO("Save %s", filename);
     pb_ostream_t stream = {&writecb, static_cast<Print *>(&f), protoSize};
 
+    bool okay = false;
     if (!pb_encode(&stream, fields, dest_struct)) {
         LOG_ERROR("Error: can't encode protobuf %s", PB_GET_ERROR(&stream));
     } else {
@@ -1295,11 +1309,14 @@ bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_
 
     if (!okay || !writeSucceeded) {
         LOG_ERROR("Can't write prefs!");
+        return false;
     }
+    return true;
 #else
     LOG_ERROR("ERROR: Filesystem not implemented");
+    return false;
 #endif
-    return okay;
+#endif
 }
 
 bool NodeDB::saveChannelsToDisk()
@@ -1326,6 +1343,13 @@ bool NodeDB::saveDeviceStateToDisk()
 
 bool NodeDB::saveNodeDatabaseToDisk()
 {
+#ifdef USE_EXTENDED_FS_FOR_NODEDB
+    // Use variant-specific implementation with radio state checking
+    // Note: Throttling is already handled in updateUser() (addFromContact calls this directly without throttling)
+    return NodeDBFilesystemAdapter::saveNodeDatabaseToDisk(lastNodeDbSave);
+#else
+    // No throttling here - it's already in updateUser() (addFromContact calls this directly without throttling)
+    // Just save directly
 #ifdef FSCom
     spiLock->lock();
     FSCom.mkdir("/prefs");
@@ -1334,6 +1358,7 @@ bool NodeDB::saveNodeDatabaseToDisk()
     size_t nodeDatabaseSize;
     pb_get_encoded_size(&nodeDatabaseSize, meshtastic_NodeDatabase_fields, &nodeDatabase);
     return saveProto(nodeDatabaseFileName, nodeDatabaseSize, &meshtastic_NodeDatabase_msg, &nodeDatabase, false);
+#endif
 }
 
 bool NodeDB::saveToDiskNoRetry(int saveWhat)
@@ -1719,15 +1744,47 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                     meshNodes->at(i) = meshNodes->at(i + 1);
                 }
                 (numMeshNodes)--;
+                meshNodes->resize(numMeshNodes);
+            } else {
+                // If no node found to evict, try to evict the oldest non-favorite node
+                if (numMeshNodes > 1 && numMeshNodes >= MAX_NUM_NODES) {
+                    oldestIndex = 1;
+                    for (int i = oldestIndex; i < numMeshNodes - 1; i++) {
+                        meshNodes->at(i) = meshNodes->at(i + 1);
+                    }
+                    (numMeshNodes)--;
+                    meshNodes->resize(numMeshNodes);
+                } else if (numMeshNodes >= MAX_NUM_NODES) {
+                    LOG_ERROR("Cannot add node %u: database full (%u/%u nodes)", n, numMeshNodes, MAX_NUM_NODES);
+                    return nullptr;
+                }
             }
         }
-        // add the node at the end
-        lite = &meshNodes->at((numMeshNodes)++);
 
-        // everything is missing except the nodenum
-        memset(lite, 0, sizeof(*lite));
-        lite->num = n;
-        LOG_INFO("Adding node to database with %i nodes and %u bytes free!", numMeshNodes, memGet.getFreeHeap());
+        if (isFull()) {
+            LOG_ERROR("Cannot add node %u: database full (%u/%u nodes) or low memory (%u bytes free)", 
+                     n, numMeshNodes, MAX_NUM_NODES, memGet.getFreeHeap());
+            return nullptr;
+        }
+        
+        // Verify capacity before push_back() to prevent reallocation
+        if (meshNodes->size() != (size_t)numMeshNodes) {
+            meshNodes->resize(numMeshNodes);
+        }
+        
+        if (meshNodes->capacity() < (size_t)numMeshNodes + 1) {
+            meshNodes->reserve(MAX_NUM_NODES);
+            if (meshNodes->capacity() < (size_t)numMeshNodes + 1) {
+                LOG_ERROR("Failed to reserve memory for node %u", n);
+                return nullptr;
+            }
+        }
+        
+        meshtastic_NodeInfoLite newNode = {};
+        newNode.num = n;
+        meshNodes->push_back(newNode);
+        numMeshNodes++;
+        lite = &meshNodes->at(numMeshNodes - 1);
     }
 
     return lite;

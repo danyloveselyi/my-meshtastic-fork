@@ -148,6 +148,7 @@ inline void reportLittleFSCorruptionOnce()
 }
 } // namespace
 
+#ifndef RAK_4631
 void preFSBegin()
 {
     // The GPREGRET register keeps its value across warm boots. Check that this is a warm boot and, if GPREGRET
@@ -159,6 +160,10 @@ void preFSBegin()
     InternalFS.format();
     LOG_INFO("LittleFS format complete; restoring default settings");
 }
+#else
+// For RAK4631 Lite variant, preFSBegin() is implemented in variants/rak4631_lite/filesystem/main/main-fs-pre-init.cpp
+__attribute__((weak)) void preFSBegin() {}
+#endif
 
 extern "C" void lfs_assert(const char *reason)
 {

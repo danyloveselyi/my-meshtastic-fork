@@ -289,6 +289,7 @@ class NodeDB
     bool saveChannelsToDisk();
     bool saveDeviceStateToDisk();
     bool saveNodeDatabaseToDisk();
+    void verifyNodeDatabaseFromDisk();
 };
 
 extern NodeDB *nodeDB;
