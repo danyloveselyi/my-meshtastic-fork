@@ -622,19 +622,13 @@ void fsInitExtended()
     LOG_INFO("Current millis(): %lu", millis());
     LOG_INFO("========================================");
     
-    // Initialize extended filesystem for NodeDB (80 pages, 320 KB)
-    // Main filesystem remains on 7 pages (28 KB) for configs
-    // Extended filesystem is used ONLY for NodeDB (nodes.proto)
+    // NOTE: Extended filesystem initialization is now LAZY - it happens automatically
+    // when needed (when saving/loading nodes.proto). This prevents blocking device startup.
+    // We don't initialize it here to avoid blocking startup with formatting/erasing operations.
+    // Extended filesystem will be initialized automatically by useExtendedFSForNodeDB() when
+    // nodes.proto operations are performed.
     #ifdef USE_EXTENDED_FS_FOR_NODEDB
-    // Initialize extended filesystem - this will be called from FSCommon.cpp
-    // We just log status here
-    extern bool useExtendedFSForNodeDB();
-    bool extended_available = useExtendedFSForNodeDB();
-    if (extended_available) {
-        LOG_INFO("Extended filesystem status: READY for NodeDB (80 pages, 320 KB)");
-    } else {
-        LOG_ERROR("Extended filesystem status: FAILED - NodeDB will use main filesystem (7 pages, 28 KB)");
-    }
+    LOG_INFO("Extended filesystem: LAZY initialization (will init when nodes.proto is accessed)");
     #endif
   }
 #else

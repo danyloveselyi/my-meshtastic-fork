@@ -31,8 +31,12 @@ LoadFileResult loadProto(const char *filename, size_t protoSize, size_t objSize,
 {
     // Check if this is nodes.proto and if extended filesystem should be used
     if (useExtendedFSForNodeDB() && isNodeDBFile(filename)) {
-        // Use extended filesystem for nodes.proto
-        return loadFromExtendedFS(filename, protoSize, objSize, fields, dest_struct);
+        // CRITICAL OPTIMIZATION: For extended filesystem, ignore protoSize parameter
+        // and use real file size instead. This prevents excessive memory allocation
+        // (getMaxNodesAllocatedSize() can be 227KB, but file might be only 3 bytes).
+        // loadFromExtendedFS() will determine actual file size and allocate only what's needed.
+        // Pass 0 as protoSize to indicate "use file size" instead of pre-allocated size.
+        return loadFromExtendedFS(filename, 0, objSize, fields, dest_struct);
     }
     
     // Use main filesystem (standard behavior) - delegate to standard NodeDB implementation

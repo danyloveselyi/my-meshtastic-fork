@@ -19,6 +19,13 @@
 #include "TypeConversions.h"
 #ifdef USE_EXTENDED_FS_FOR_NODEDB
 #include "nodedb/NodeDBFilesystemAdapter.h"  // Variant-specific radio state checking
+#if defined(ARCH_NRF52) && defined(RAK_4631)
+#include "../../variants/rak4631_lite/nodedb/NodeDBVirtualBackend.h"  // Virtual backend for 1000-1500 nodes
+// Forward declaration for ExtendedFS initialization
+bool useExtendedFSForNodeDB();
+// Include variant-specific patches for NodeDB
+#include "../../variants/rak4631_lite/nodedb/NodeDB-patches.h"
+#endif
 #endif
 #include "error.h"
 #include "main.h"
@@ -30,6 +37,12 @@
 #include <pb_decode.h>
 #include <pb_encode.h>
 #include <vector>
+
+#ifdef USE_EXTENDED_FS_FOR_NODEDB
+#if defined(ARCH_NRF52) && defined(RAK_4631)
+#include "../../variants/rak4631_lite/nodedb/NodeDBVirtualBackend.h"  // For callback to prevent vector expansion
+#endif
+#endif
 
 #ifdef ARCH_ESP32
 #if HAS_WIFI
@@ -53,6 +66,8 @@
 #ifdef ARCH_NRF52
 #include <bluefruit.h>
 #include <utility/bonding.h>
+// Forward declaration for nrf52Loop() (for PAUSE_ON_START mode)
+extern void nrf52Loop();
 #endif
 
 #if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_WIFI
@@ -166,8 +181,15 @@ bool meshtastic_NodeDatabase_callback(pb_istream_t *istream, pb_ostream_t *ostre
         meshtastic_NodeInfoLite node; // this gets good data
         std::vector<meshtastic_NodeInfoLite> *vec = (std::vector<meshtastic_NodeInfoLite> *)field->pData;
 
-        if (istream->bytes_left && pb_decode(istream, meshtastic_NodeInfoLite_fields, &node))
+        if (istream->bytes_left && pb_decode(istream, meshtastic_NodeInfoLite_fields, &node)) {
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+            // Use patched version from variant (handles virtual backend)
+            handleNodeInsertionForVirtualBackend(node, vec);
+#else
+            // Standard behavior: add to vector
             vec->push_back(node);
+#endif
+        }
     }
     return true;
 }
@@ -200,6 +222,8 @@ NodeDB::NodeDB()
     loadFromDisk();
     cleanupMeshDB();
 
+    // CRITICAL: Compute CRC AFTER loadFromDisk() but BEFORE any modifications
+    // This allows us to detect if data was modified during initialization
     uint32_t devicestateCRC = crc32Buffer(&devicestate, sizeof(devicestate));
     uint32_t nodeDatabaseCRC = crc32Buffer(&nodeDatabase, sizeof(nodeDatabase));
     uint32_t configCRC = crc32Buffer(&config, sizeof(config));
@@ -351,15 +375,6 @@ NodeDB::NodeDB()
         config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY;
     }
 
-    if (devicestateCRC != crc32Buffer(&devicestate, sizeof(devicestate)))
-        saveWhat |= SEGMENT_DEVICESTATE;
-    if (nodeDatabaseCRC != crc32Buffer(&nodeDatabase, sizeof(nodeDatabase)))
-        saveWhat |= SEGMENT_NODEDATABASE;
-    if (configCRC != crc32Buffer(&config, sizeof(config)))
-        saveWhat |= SEGMENT_CONFIG;
-    if (channelFileCRC != crc32Buffer(&channelFile, sizeof(channelFile)))
-        saveWhat |= SEGMENT_CHANNELS;
-
     if (config.position.gps_enabled) {
         config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_ENABLED;
         config.position.gps_enabled = 0;
@@ -389,6 +404,40 @@ NodeDB::NodeDB()
 #endif
     }
 #endif
+    
+    // CRITICAL: Check CRC AFTER all modifications to detect changes
+    // If CRC changed, data was modified and needs to be saved
+    // Also check if files exist (for first boot or factory reset)
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles CRC and file existence checks)
+    saveWhat = calculateSaveWhatFlags(devicestateCRC, nodeDatabaseCRC, configCRC, channelFileCRC, saveWhat);
+#else
+    // Standard behavior: check CRC and file existence
+    if (devicestateCRC != crc32Buffer(&devicestate, sizeof(devicestate)))
+        saveWhat |= SEGMENT_DEVICESTATE;
+    if (nodeDatabaseCRC != crc32Buffer(&nodeDatabase, sizeof(nodeDatabase)))
+        saveWhat |= SEGMENT_NODEDATABASE;
+    if (configCRC != crc32Buffer(&config, sizeof(config)))
+        saveWhat |= SEGMENT_CONFIG;
+    if (channelFileCRC != crc32Buffer(&channelFile, sizeof(channelFile)))
+        saveWhat |= SEGMENT_CHANNELS;
+    
+    #ifdef FSCom
+    if (!FSCom.exists(configFileName)) {
+        saveWhat |= SEGMENT_CONFIG;
+    }
+    if (!FSCom.exists(deviceStateFileName)) {
+        saveWhat |= SEGMENT_DEVICESTATE;
+    }
+    if (!FSCom.exists(moduleConfigFileName)) {
+        saveWhat |= SEGMENT_MODULECONFIG;
+    }
+    if (!FSCom.exists(channelFileName)) {
+        saveWhat |= SEGMENT_CHANNELS;
+    }
+    #endif
+#endif
+    
     saveToDisk(saveWhat);
 }
 
@@ -478,9 +527,21 @@ void NodeDB::installDefaultNodeDatabase()
 {
     LOG_DEBUG("Install default NodeDatabase");
     nodeDatabase.version = DEVICESTATE_CUR_VER;
+    
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend initialization)
+    if (initializeVirtualBackendForNodeDatabase(nodeDatabase, numMeshNodes, meshNodes)) {
+        return;  // Early return - virtual backend handles network nodes
+    }
+    // If virtual backend initialization failed, fall through to standard allocation
+    // Use patched version for standard allocation with memory checks
+    performStandardVectorAllocation(nodeDatabase, numMeshNodes, meshNodes, MAX_NUM_NODES);
+#else
+    // Standard allocation (for platforms without virtual backend)
     nodeDatabase.nodes = std::vector<meshtastic_NodeInfoLite>(MAX_NUM_NODES);
     numMeshNodes = 0;
     meshNodes = &nodeDatabase.nodes;
+#endif
 }
 
 void NodeDB::installDefaultConfig(bool preserveKey = false)
@@ -932,8 +993,17 @@ void NodeDB::resetNodes()
 {
     if (!config.position.fixed_position)
         clearLocalPosition();
+    
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    NodeNum localNodeNum = getNodeNum();
+    resetNodesWithVirtualBackend(nodeDatabase, numMeshNodes, [localNodeNum]() { return localNodeNum; });
+#else
+    // Standard implementation
     numMeshNodes = 1;
     std::fill(nodeDatabase.nodes.begin() + 1, nodeDatabase.nodes.end(), meshtastic_NodeInfoLite());
+#endif
+
     devicestate.has_rx_text_message = false;
     devicestate.has_rx_waypoint = false;
     saveNodeDatabaseToDisk();
@@ -944,6 +1014,15 @@ void NodeDB::resetNodes()
 
 void NodeDB::removeNodeByNum(NodeNum nodeNum)
 {
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    NodeNum localNodeNum = getNodeNum();
+    if (removeNodeByNumWithVirtualBackend(nodeNum, [localNodeNum]() { return localNodeNum; })) {
+        return;  // Node was removed by virtual backend
+    }
+#endif
+
+    // Standard implementation: remove from vector
     int newPos = 0, removed = 0;
     for (int i = 0; i < numMeshNodes; i++) {
         if (meshNodes->at(i).num != nodeNum)
@@ -1140,7 +1219,17 @@ void NodeDB::loadFromDisk()
         LOG_WARN("Node count %d exceeds MAX_NUM_NODES %d, truncating", numMeshNodes, MAX_NUM_NODES);
         numMeshNodes = MAX_NUM_NODES;
     }
+    
+    // CRITICAL OPTIMIZATION: Check available memory before resize to prevent allocation failure
+    // If vector is empty or small, resize might try to allocate MAX_NUM_NODES * sizeof(NodeInfoLite)
+    // which can be 227KB - too much for available memory (181KB free)
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52)
+    // Use patched version from variant (already included at top of file)
+    resizeMeshNodesSafely(meshNodes, numMeshNodes, MAX_NUM_NODES);
+#else
+    // Standard resize (for other platforms)
     meshNodes->resize(MAX_NUM_NODES);
+#endif
 
     // static DeviceState scratch; We no longer read into a tempbuf because this structure is 15KB of valuable RAM
     state = loadProto(deviceStateFileName, meshtastic_DeviceState_size, sizeof(meshtastic_DeviceState),
@@ -1439,10 +1528,20 @@ bool NodeDB::saveToDisk(int saveWhat)
 
 const meshtastic_NodeInfoLite *NodeDB::readNextMeshNode(uint32_t &readIndex)
 {
-    if (readIndex < numMeshNodes)
+    // First, iterate through vector (local node)
+    if (readIndex < numMeshNodes) {
         return &meshNodes->at(readIndex++);
-    else
-        return NULL;
+    }
+
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    const meshtastic_NodeInfoLite* node = readNextMeshNodeWithVirtualBackend(readIndex, numMeshNodes, meshNodes);
+    if (node) {
+        return node;
+    }
+#endif
+
+    return NULL;
 }
 
 /// Given a node, return how many seconds in the past (vs now) that we last heard from it
@@ -1472,17 +1571,23 @@ uint32_t sinceReceived(const meshtastic_MeshPacket *p)
 
 size_t NodeDB::getNumOnlineMeshNodes(bool localOnly)
 {
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    // This function counts both vector and virtual backend nodes
+    return getNumOnlineMeshNodesWithVirtualBackend(numMeshNodes, meshNodes, localOnly, sinceLastSeen);
+#else
+    // Standard implementation
     size_t numseen = 0;
-
     // FIXME this implementation is kinda expensive
+    // First, check vector (local node)
     for (int i = 0; i < numMeshNodes; i++) {
         if (localOnly && meshNodes->at(i).via_mqtt)
             continue;
         if (sinceLastSeen(&meshNodes->at(i)) < NUM_ONLINE_SECS)
             numseen++;
     }
-
     return numseen;
+#endif
 }
 
 #include "MeshModule.h"
@@ -1657,6 +1762,15 @@ void NodeDB::updateFrom(const meshtastic_MeshPacket &mp)
     if (mp.which_payload_variant == meshtastic_MeshPacket_decoded_tag && mp.from) {
         LOG_DEBUG("Update DB node 0x%x, rx_time=%u", mp.from, mp.rx_time);
 
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+        // Use patched version from variant (handles virtual backend)
+        updateFromWithVirtualBackend(&mp, getFrom);
+        if (NodeDBVirtualBackend::isEnabled()) {
+            return;  // Virtual backend handled the update
+        }
+#endif
+        
+        // Original implementation
         meshtastic_NodeInfoLite *info = getOrCreateMeshNode(getFrom(&mp));
         if (!info) {
             return;
@@ -1691,22 +1805,57 @@ uint8_t NodeDB::getMeshNodeChannel(NodeNum n)
 /// NOTE: This function might be called from an ISR
 meshtastic_NodeInfoLite *NodeDB::getMeshNode(NodeNum n)
 {
+    // First, check vector (for local node)
     for (int i = 0; i < numMeshNodes; i++)
         if (meshNodes->at(i).num == n)
             return &meshNodes->at(i);
 
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    meshtastic_NodeInfoLite* node = getMeshNodeWithVirtualBackend(n, numMeshNodes, meshNodes);
+    if (node) {
+        return node;
+    }
+#endif
+
     return NULL;
+}
+
+size_t NodeDB::getNumMeshNodes()
+{
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    return getNumMeshNodesWithVirtualBackend(numMeshNodes);
+#endif
+    // Standard implementation: only vector nodes
+    return numMeshNodes;
 }
 
 // returns true if the maximum number of nodes is reached or we are running low on memory
 bool NodeDB::isFull()
 {
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    return isFullWithVirtualBackend(numMeshNodes, MAX_NUM_NODES);
+#endif
+    // Standard implementation
     return (numMeshNodes >= MAX_NUM_NODES) || (memGet.getFreeHeap() < MINIMUM_SAFE_FREE_HEAP);
 }
 
 /// Find a node in our DB, create an empty NodeInfo if missing
 meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
 {
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles lazy initialization of virtual backend)
+    NodeNum localNodeNum = getNodeNum();
+    meshtastic_NodeInfoLite* result = getOrCreateMeshNodeLazyInit(n, 
+                                                                  [localNodeNum]() { return localNodeNum; },
+                                                                  [this](NodeNum num) { return this->getMeshNode(num); });
+    if (result) {
+        return result;  // Virtual backend handled the node
+    }
+#endif
+    
     meshtastic_NodeInfoLite *lite = getMeshNode(n);
 
     if (!lite) {

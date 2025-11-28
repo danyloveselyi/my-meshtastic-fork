@@ -248,8 +248,9 @@ SO GPIO 39/TXEN MAY NOT BE DEFINED FOR SUCCESSFUL OPERATION OF THE SX1262 - TG
 // PIN code is now hardcoded in DeviceStatsModule.cpp
 
 // Override default MAX_NUM_NODES for RAK4631 at compile time
+// Set to 1234 to support maximum nodes with virtual backend (flash storage)
 #undef MAX_NUM_NODES
-#define MAX_NUM_NODES 500
+#define MAX_NUM_NODES 1234
 
 // Reduce messages stored for phone connection to save RAM
 #define MAX_RX_TOPHONE 4     // Reduce from default 32 to 4 (save ~28*MeshPacket_size RAM)

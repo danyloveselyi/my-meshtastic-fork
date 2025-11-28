@@ -7,7 +7,12 @@
 // Safety constants for embedded systems
 #define MAX_TRIM_LENGTH 512              // Safety limit for string operations
 #define MINIMUM_SAFE_FREE_HEAP 8192      // 8KB minimum free heap (prevent OOM)
-#define MAX_NODES_ARRAY_BOUND 500        // Maximum nodes to iterate safely
+// Maximum nodes to iterate safely - use MAX_NODES_SLOTS if virtual backend is enabled
+#ifndef MAX_NODES_SLOTS
+#define MAX_NODES_ARRAY_BOUND 500        // Default for non-virtual backend
+#else
+#define MAX_NODES_ARRAY_BOUND MAX_NODES_SLOTS  // Use configured max slots for virtual backend
+#endif
 #define MAX_MESSAGE_RETRIES 3            // Retry failed sends up to 3 times
 
 // Helper: trim leading/trailing whitespace in-place
@@ -48,6 +53,9 @@ void trim(char* s) {
 #include "modules/NeighborInfoModule.h"
 #include "PowerStatus.h"
 #include "RTC.h"
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+#include "../../../variants/rak4631_lite/nodedb/NodeDBVirtualBackend.h"
+#endif
 #include "FSCommon.h"
 #include "SPILock.h"
 #include <time.h>
@@ -734,12 +742,16 @@ bool DeviceStatsModule::wantPacket(const meshtastic_MeshPacket *p)
 
 void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSize)
 {
+    LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: START");
+    
     // Safety check for long-term operation
     if (!buffer || bufferSize < 300) {
         LOG_ERROR(DS_LOG_PREFIX "Invalid buffer for detailed memory stats formatting");
         return;
     }
 
+    LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 1 - Getting flash stats");
+    
     // Get memory statistics with safety checks and validation
     uint32_t flashTotal = 0;
     uint32_t flashUsed = 0;
@@ -762,11 +774,24 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     flashTotal = 28 * 1024;  // LittleFS area size (7 pages * 4KB = 28 KB)
     flashUsed = 0;
 
-    // Sum all files in filesystem (recursive, all directories)
-    std::vector<meshtastic_FileInfo> files = getFiles("/", 10);
-    for (const auto& file : files) {
-        flashUsed += file.size_bytes;
-    }
+    // CRITICAL OPTIMIZATION: Do NOT scan filesystem - it causes freezes!
+    // Instead, use estimated size based on typical config files:
+    // - config.proto: ~200 bytes
+    // - device.proto: ~100 bytes
+    // - module.proto: ~100 bytes
+    // - channels.proto: ~100 bytes
+    // - uiconfig.proto: ~50 bytes (optional)
+    // - Bluetooth bonding data: ~2-4 KB
+    // - Total estimate: ~5 KB for config files + ~3 KB overhead = ~8 KB
+    const uint32_t ESTIMATED_CONFIG_SIZE = 8 * 1024;  // 8 KB estimate
+    flashUsed = ESTIMATED_CONFIG_SIZE;
+    
+    // If we have virtual backend, we know nodes are in extended FS, not main FS
+    // So main FS usage is just config files (small)
+    #if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Virtual backend uses extended FS for nodes, so main FS is only config files
+    // No need to scan - we know it's small
+    #endif
 #else
     // Other platforms: use internal flash stats as fallback
     flashTotal = MemoryStats::getFlashTotal();
@@ -781,9 +806,13 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     flashFree = MemoryStats::getFlashFree();
 #endif
 
+    LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 2 - Getting heap stats");
+    
     uint32_t heapTotal = MemoryStats::getHeapTotal();
     uint32_t heapFree = MemoryStats::getHeapFree();
 
+    LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 3 - Validating memory stats");
+    
     bool memValid = true;
     if (flashTotal == 0 || heapTotal == 0) {
         memValid = false;
@@ -796,13 +825,105 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
     }
     uint32_t heapUsed = (heapTotal >= heapFree) ? (heapTotal - heapFree) : 0;
 
+    LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4 - Getting node statistics");
+    
     // Get node statistics with NULL check
     uint32_t storedNodes = 0;  // Total nodes stored in database
     uint32_t onlineNodes = 0;  // Currently active/online nodes
+    uint32_t cachedNodes = 0;  // Nodes in RAM cache (virtual backend only)
+    uint32_t freeFlashSlots = 0;  // Free flash slots (virtual backend only)
+    bool virtualBackendEnabled = false;
+    bool virtualBackendAvailable = false;  // True if virtual backend is configured (even if not yet initialized)
+    
+    #if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    virtualBackendAvailable = true;  // Virtual backend is available for this variant
+    #endif
+    
     if (nodeDB) {
-        // CRITICAL FIX: Check nodeDB state is valid
+        LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.1 - nodeDB exists");
+        
+        LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.2 - Checking virtual backend");
+        
+        // Check if virtual backend is enabled (initialized)
+        #if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+        // CRITICAL: Use isAvailable() instead of isEnabled() to avoid triggering initialization
+        // isAvailable() returns true if backend is compiled in, even if not yet initialized
+        // This prevents slow initialize() call during /mem command
+        if (NodeDBVirtualBackend::isAvailable()) {
+            LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.3 - Virtual backend available");
+            // Check if already initialized (fast check)
+            if (NodeDBVirtualBackend::isEnabled()) {
+                LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.4 - Virtual backend enabled, querying stats");
+                virtualBackendEnabled = true;
+                // CRITICAL: These calls are now safe - they check initialization internally
+                // Add timeout protection to prevent freeze if backend is slow
+                uint32_t backend_query_start = millis();
+                const uint32_t MAX_BACKEND_QUERY_TIME_MS = 50;  // Reduced to 50ms - queries should be fast
+                
+                LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.5 - Calling getTotalNodeCount()");
+                // Query backend with timeout protection
+                storedNodes = NodeDBVirtualBackend::getTotalNodeCount();
+                LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.6 - getTotalNodeCount() returned %u", storedNodes);
+                if ((millis() - backend_query_start) < MAX_BACKEND_QUERY_TIME_MS) {
+                    cachedNodes = NodeDBVirtualBackend::getCachedNodeCount();
+                } else {
+                    LOG_WARN(DS_LOG_PREFIX "Backend query timeout after getTotalNodeCount, skipping cachedNodes");
+                    cachedNodes = 0;
+                }
+                if ((millis() - backend_query_start) < MAX_BACKEND_QUERY_TIME_MS) {
+                    freeFlashSlots = NodeDBVirtualBackend::getFreeFlashSlots();
+                } else {
+                    LOG_WARN(DS_LOG_PREFIX "Backend query timeout, skipping freeFlashSlots");
+                    freeFlashSlots = 0;
+                }
+                
+                if ((millis() - backend_query_start) > MAX_BACKEND_QUERY_TIME_MS) {
+                    LOG_WARN(DS_LOG_PREFIX "Backend query took %u ms (max: %u ms), some values may be missing", 
+                             millis() - backend_query_start, MAX_BACKEND_QUERY_TIME_MS);
+                }
+            } else {
+                // Backend available but not initialized - use estimates
+                virtualBackendEnabled = false;
+                // CRITICAL: Do NOT call NodeStats::getValidNodeCount() when virtual backend is available
+                // because meshNodes array may be empty (only local node), causing freeze
+                storedNodes = 0;  // Will be set below if virtual backend not used
+                cachedNodes = 0;
+                #ifdef MAX_NODES_SLOTS
+                freeFlashSlots = MAX_NODES_SLOTS;
+                #else
+                freeFlashSlots = MAX_NUM_NODES;  // Use MAX_NUM_NODES from variant.h
+                #endif
+            }
+        } else if (virtualBackendAvailable) {
+            // Virtual backend is available but not yet initialized (lazy initialization)
+            // Show 0 for cached nodes and calculate free slots from MAX_NUM_NODES
+            storedNodes = 0;  // Will be set below if virtual backend not used
+            cachedNodes = 0;
+            #ifdef MAX_NODES_SLOTS
+            freeFlashSlots = MAX_NODES_SLOTS;
+            #else
+            freeFlashSlots = MAX_NUM_NODES;  // Use MAX_NUM_NODES from variant.h
+            #endif
+        } else {
+            // No virtual backend - use standard NodeDB methods
+            LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.1.1 - No virtual backend, using standard NodeDB");
+            LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.1.2 - Calling NodeStats::getValidNodeCount()");
+            storedNodes = NodeStats::getValidNodeCount(nodeDB);
+            LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.1.3 - NodeStats::getValidNodeCount() returned %u", storedNodes);
+        }
+        #else
+        // No virtual backend support - use standard NodeDB methods
+        LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.1.1 - No virtual backend support, using standard NodeDB");
+        LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.1.2 - Calling NodeStats::getValidNodeCount()");
         storedNodes = NodeStats::getValidNodeCount(nodeDB);
+        LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.1.3 - NodeStats::getValidNodeCount() returned %u", storedNodes);
+        #endif
+        
+        // Get online nodes count (safe to call regardless of backend)
+        LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.1.4 - Calling nodeDB->getNumOnlineMeshNodes()");
         onlineNodes = nodeDB->getNumOnlineMeshNodes();
+        LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 4.1.5 - nodeDB->getNumOnlineMeshNodes() returned %u", onlineNodes);
+        
         // Sanity check node count
         if (storedNodes > MAX_NODES_ARRAY_BOUND) {
             LOG_WARN(DS_LOG_PREFIX "Node count suspiciously high: %u (capping at %u)", storedNodes, MAX_NODES_ARRAY_BOUND);
@@ -812,6 +933,14 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
 
     // Use consistent max nodes calculation
     uint32_t maxNodes = MAX_NUM_NODES;
+    if (virtualBackendEnabled || virtualBackendAvailable) {
+        // Use MAX_NODES_SLOTS (which equals MAX_NUM_NODES from variant.h)
+        #ifdef MAX_NODES_SLOTS
+        maxNodes = MAX_NODES_SLOTS;
+        #else
+        maxNodes = MAX_NUM_NODES;  // Use MAX_NUM_NODES from variant.h (1234 for RAK4631)
+        #endif
+    }
 
     // Calculate available node slots (can be negative if over limit)
     int32_t availableNodeSlots = calculateAvailableNodeSlots(storedNodes, maxNodes);
@@ -851,33 +980,57 @@ void DeviceStatsModule::formatDetailedMemoryStats(char* buffer, size_t bufferSiz
         formatBytesHuman(nodeDBFlashFree, nodeDBFlashFreeStr, sizeof(nodeDBFlashFreeStr));
     }
     
+    LOG_DEBUG(DS_LOG_PREFIX "formatDetailedMemoryStats: Step 6 - Formatting output");
+    
     // Format detailed memory report (simplified to <300 chars)
     int result;
     if (memValid) {
         if (nodeDBFSEnabled) {
             // Extended filesystem enabled - show both main FS and NodeDB FS
-            if (availableNodeSlots >= 0) {
+            if (virtualBackendEnabled || virtualBackendAvailable) {
+                // Virtual backend available (enabled or not yet initialized) - show cache/total/flash stats
                 result = snprintf(buffer, bufferSize,
                     "📊 Memory\n"
                     "Config FS: %s/%s\n"
                     "NodeDB FS: %s/%s\n"
                     "Heap: %s/%s\n"
-                    "Nodes: %u/%u online %d free",
+                    "Nodes: %u/%u (cache: %u/%u)\n"
+                    "Flash slots: %u free",
                     flashUsedStr, flashTotalStr,
                     nodeDBFlashUsedStr, nodeDBFlashTotalStr,
                     heapUsedStr, heapTotalStr,
-                    onlineNodes, storedNodes, availableNodeSlots);
+                    storedNodes, maxNodes, cachedNodes, 
+                    #ifdef MAX_NODES_CACHE
+                    MAX_NODES_CACHE,
+                    #else
+                    300,  // Default if not configured
+                    #endif
+                    freeFlashSlots);
             } else {
-                result = snprintf(buffer, bufferSize,
-                    "📊 Memory\n"
-                    "Config FS: %s/%s\n"
-                    "NodeDB FS: %s/%s\n"
-                    "Heap: %s/%s\n"
-                    "Nodes: %u/%u online OVER %d",
-                    flashUsedStr, flashTotalStr,
-                    nodeDBFlashUsedStr, nodeDBFlashTotalStr,
-                    heapUsedStr, heapTotalStr,
-                    onlineNodes, storedNodes, -availableNodeSlots);
+                // Standard extended FS (no virtual backend)
+                if (availableNodeSlots >= 0) {
+                    result = snprintf(buffer, bufferSize,
+                        "📊 Memory\n"
+                        "Config FS: %s/%s\n"
+                        "NodeDB FS: %s/%s\n"
+                        "Heap: %s/%s\n"
+                        "Nodes: %u/%u online %d free",
+                        flashUsedStr, flashTotalStr,
+                        nodeDBFlashUsedStr, nodeDBFlashTotalStr,
+                        heapUsedStr, heapTotalStr,
+                        onlineNodes, storedNodes, availableNodeSlots);
+                } else {
+                    result = snprintf(buffer, bufferSize,
+                        "📊 Memory\n"
+                        "Config FS: %s/%s\n"
+                        "NodeDB FS: %s/%s\n"
+                        "Heap: %s/%s\n"
+                        "Nodes: %u/%u online OVER %d",
+                        flashUsedStr, flashTotalStr,
+                        nodeDBFlashUsedStr, nodeDBFlashTotalStr,
+                        heapUsedStr, heapTotalStr,
+                        onlineNodes, storedNodes, -availableNodeSlots);
+                }
             }
         } else {
             // Standard filesystem only
@@ -1339,9 +1492,35 @@ void DeviceStatsModule::formatNodesInfo(char* buffer, size_t bufferSize)
     // Get node statistics with safety checks
     uint32_t onlineNodes = nodeDB ? nodeDB->getNumOnlineMeshNodes() : 0;
     uint32_t storedNodes = nodeDB ? NodeStats::getValidNodeCount(nodeDB) : 0;
+    uint32_t cachedNodes = 0;
+    uint32_t freeFlashSlots = 0;
+    bool virtualBackendEnabled = false;
+
+    // Check if virtual backend is enabled
+    #if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    if (NodeDBVirtualBackend::isEnabled()) {
+        virtualBackendEnabled = true;
+        storedNodes = NodeDBVirtualBackend::getTotalNodeCount();
+        cachedNodes = NodeDBVirtualBackend::getCachedNodeCount();
+        freeFlashSlots = NodeDBVirtualBackend::getFreeFlashSlots();
+    }
+    #endif
 
     // Use consistent max nodes calculation
     uint32_t maxNodes = MAX_NUM_NODES;
+    bool virtualBackendAvailable = false;
+    #if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    virtualBackendAvailable = true;  // Virtual backend is available for this variant
+    #endif
+    
+    if (virtualBackendEnabled || virtualBackendAvailable) {
+        // Use MAX_NODES_SLOTS (which equals MAX_NUM_NODES from variant.h)
+        #ifdef MAX_NODES_SLOTS
+        maxNodes = MAX_NODES_SLOTS;
+        #else
+        maxNodes = MAX_NUM_NODES;  // Use MAX_NUM_NODES from variant.h (1234 for RAK4631)
+        #endif
+    }
 
     uint32_t offlineNodes = (storedNodes > onlineNodes) ? (storedNodes - onlineNodes) : 0;
     // Calculate available node slots (can be negative if over limit)
@@ -1370,7 +1549,7 @@ void DeviceStatsModule::formatNodesInfo(char* buffer, size_t bufferSize)
         uint32_t actualNodeCount = NodeStats::getValidNodeCount(nodeDB);
         // Still need to check all slots since valid nodes can be sparse in array
         uint32_t arrayCapacity = nodeDB->getNumMeshNodes();
-        for (uint32_t i = 0; i < arrayCapacity && i < 500; i++) { // Add upper bound check
+        for (uint32_t i = 0; i < arrayCapacity && i < MAX_NODES_ARRAY_BOUND; i++) { // Add upper bound check
             meshtastic_NodeInfoLite *node = nodeDB->getMeshNodeByIndex(i);
             if (!node || !node->has_user) continue; // Skip empty slots
 
@@ -1420,7 +1599,31 @@ void DeviceStatsModule::formatNodesInfo(char* buffer, size_t bufferSize)
     int result;
     if (isTimeSynchronized) {
         // Show online/recent stats if time is valid
-        if (availableNodeSlots >= 0) {
+        bool virtualBackendAvailable = false;
+        #if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+        virtualBackendAvailable = true;  // Virtual backend is available for this variant
+        #endif
+        
+        if (virtualBackendEnabled || virtualBackendAvailable) {
+            // Virtual backend - show cache/total/flash stats
+            result = snprintf(buffer, bufferSize,
+                "🌐 Nodes\n"
+                "Total: %u/%u (cache: %u/%u)\n"
+                "Online: %u %.0f%%\n"
+                "Recent: %u <10m\n"
+                "Flash: %u slots free\n"
+                "Time: %s",
+                storedNodes, maxNodes, cachedNodes,
+                #ifdef MAX_NODES_CACHE
+                MAX_NODES_CACHE,
+                #else
+                300,  // Default if not configured
+                #endif
+                onlineNodes, onlinePercent,
+                recentNodes,
+                freeFlashSlots,
+                timeStr);
+        } else if (availableNodeSlots >= 0) {
             result = snprintf(buffer, bufferSize,
                 "🌐 Nodes\n"
                 "Online: %u/%u %.0f%%\n"

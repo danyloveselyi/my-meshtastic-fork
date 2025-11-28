@@ -76,6 +76,35 @@ bool getExtendedFSStats(uint32_t* total, uint32_t* used, uint32_t* free);
  */
 extern "C" void initExtendedFilesystemForNodeDB();
 
+/**
+ * @brief Read node slot from extended filesystem
+ * @param slotId Slot ID (0-1233)
+ * @param buffer Output buffer
+ * @param size Buffer size
+ * @return true if read was successful
+ * 
+ * Reads a node slot file: /nodes/slot_XXXX.bin
+ */
+bool readNodeSlot(uint16_t slotId, void* buffer, size_t size);
+
+/**
+ * @brief Write node slot to extended filesystem
+ * @param slotId Slot ID (0-1233)
+ * @param buffer Input buffer
+ * @param size Buffer size
+ * @return true if write was successful
+ * 
+ * Writes a node slot file: /nodes/slot_XXXX.bin
+ * Uses copy-on-write for wear leveling.
+ */
+bool writeNodeSlot(uint16_t slotId, const void* buffer, size_t size);
+
+/**
+ * @brief Get slot file count (for tracking free slots)
+ * @return Number of slot files that exist
+ */
+uint32_t getSlotFileCount();
+
 #else
 // If USE_EXTENDED_FS_FOR_NODEDB is not defined, provide empty functions
 inline bool useExtendedFSForNodeDB() { return false; }

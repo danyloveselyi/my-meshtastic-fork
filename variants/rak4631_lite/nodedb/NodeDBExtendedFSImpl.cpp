@@ -21,6 +21,11 @@
 #include <cstdlib>
 #include <cstring>
 
+// Forward declaration for nrf52Loop() (for feeding watchdog during flash operations)
+#ifdef ARCH_NRF52
+extern void nrf52Loop();
+#endif
+
 // Include LittleFS headers from STM32 implementation (same API)
 // We use direct LittleFS API calls, not Adafruit wrapper
 #include "../../../src/platform/stm32wl/littlefs/lfs.h"
@@ -72,19 +77,15 @@ namespace ExtendedNodeDBFS
         (void)c;  // Unused parameter
         
         if (!buffer || !size) {
-            LOG_DEBUG("lfs_read: Invalid parameters (buffer=%p, size=%u)", buffer, (unsigned)size);
+            // CRITICAL: Disable logging during flash operations to prevent buffer corruption
             return LFS_ERR_INVAL;
         }
         
         uint32_t address = EXTENDED_LFS_FLASH_ADDR + (block * EXTENDED_LFS_BLOCK_SIZE + off);
         
-        LOG_DEBUG("lfs_read: Reading %u bytes from block %u, offset %u (address: 0x%08X)", 
-                 (unsigned)size, block, off, address);
-        
+        // CRITICAL: Disable logging during flash operations to prevent buffer corruption
         // Read from flash memory
         memcpy(buffer, (void *)address, size);
-        
-        LOG_DEBUG("lfs_read: Successfully read %u bytes from 0x%08X", (unsigned)size, address);
         
         return LFS_ERR_OK;
     }
@@ -95,7 +96,7 @@ namespace ExtendedNodeDBFS
         (void)c;  // Unused parameter
         
         if (!buffer || !size) {
-            LOG_DEBUG("lfs_prog: Invalid parameters (buffer=%p, size=%u)", buffer, (unsigned)size);
+            // CRITICAL: Disable logging during flash operations to prevent buffer corruption
             return LFS_ERR_INVAL;
         }
         
@@ -106,8 +107,7 @@ namespace ExtendedNodeDBFS
         uint32_t sd_result = sd_softdevice_is_enabled(&sd_enabled);
         bool use_async = (sd_result == NRF_SUCCESS && sd_enabled);
         
-        LOG_DEBUG("lfs_prog: Writing %u bytes to block %u, offset %u (address: 0x%08X, SoftDevice: %s)", 
-                 (unsigned)size, block, off, address, use_async ? "async" : "sync");
+        // CRITICAL: Disable logging during flash operations to prevent buffer corruption
         
         uint32_t write_start_time = millis();
         uint32_t words_written = 0;
@@ -231,13 +231,18 @@ namespace ExtendedNodeDBFS
                                     // If data doesn't match, continue polling and check again later
                                 }
                                 
-                                // Yield CPU to allow other tasks and interrupts to be processed
-                                // CRITICAL: This allows LoRa interrupts to be processed during flash write wait
-                                if (!success) {
-                                    yield();  // Minimal delay to yield CPU
-                                } else {
-                                    break;  // Success found, exit immediately
-                                }
+                            // Yield CPU to allow other tasks and interrupts to be processed
+                            // CRITICAL: This allows LoRa interrupts to be processed during flash write wait
+                            // CRITICAL: Call nrf52Loop() to process SoftDevice events and feed watchdog
+                            // This matches native logic where nrf52Loop() is called from loop()
+                            if (!success) {
+                                yield();  // Minimal delay to yield CPU
+                                #ifdef ARCH_NRF52
+                                nrf52Loop();  // Process SoftDevice events and feed watchdog
+                                #endif
+                            } else {
+                                break;  // Success found, exit immediately
+                            }
                             }
                         }
                         
@@ -280,14 +285,10 @@ namespace ExtendedNodeDBFS
                         delay(1);  // 1ms pause - allows interrupt processing without significant delay
                     }
                     
-                    // Log progress every 256 words (1KB) or at start/end
-                    if (words_written == words_to_write || words_written == words_total || (words_written % 256 == 0)) {
-                        LOG_DEBUG("lfs_prog: Progress: %u/%u words written (%.1f%%)", 
-                                 words_written, words_total, (words_written * 100.0f) / words_total);
-                    }
+                    // CRITICAL: Disable logging during flash operations to prevent buffer corruption
                     break;
                 } else if (err_code == NRF_ERROR_BUSY) {
-                    LOG_DEBUG("lfs_prog: Flash busy at 0x%08X, retrying (attempt %u)...", write_addr, attempt + 1);
+                    // CRITICAL: Disable logging during flash operations to prevent buffer corruption
                     delay(50);
                     continue;
                 } else {
@@ -317,10 +318,7 @@ namespace ExtendedNodeDBFS
             }
         }
         
-        uint32_t write_time = millis() - write_start_time;
-        LOG_DEBUG("lfs_prog: Successfully wrote %u bytes (%u words) in %u ms using batch mode (address: 0x%08X)", 
-                 (unsigned)size, words_written, write_time, address);
-        
+        // CRITICAL: Disable logging during flash operations to prevent buffer corruption
         return LFS_ERR_OK;
     }
     
@@ -332,7 +330,7 @@ namespace ExtendedNodeDBFS
         uint32_t page_number = (EXTENDED_LFS_FLASH_ADDR + (block * EXTENDED_LFS_BLOCK_SIZE)) / FLASH_NRF52_PAGE_SIZE;
         uint32_t page_addr = page_number * FLASH_NRF52_PAGE_SIZE;
         
-        LOG_DEBUG("lfs_erase: Erasing block %u -> page %u (address: 0x%08X)", block, page_number, page_addr);
+        // CRITICAL: Disable logging during flash operations to prevent buffer corruption
         
         // Safety check: ensure we don't erase bootloader
         #ifdef NRF52840_XXAA
@@ -347,7 +345,7 @@ namespace ExtendedNodeDBFS
         uint32_t sd_result = sd_softdevice_is_enabled(&sd_enabled);
         bool use_async = (sd_result == NRF_SUCCESS && sd_enabled);
         
-        LOG_DEBUG("lfs_erase: SoftDevice %s, starting erase of page %u", use_async ? "enabled (async)" : "disabled (sync)", page_number);
+        // CRITICAL: Disable logging during flash operations to prevent buffer corruption
         
         uint32_t erase_start_time = millis();
         
@@ -356,12 +354,10 @@ namespace ExtendedNodeDBFS
         
         // Retry if busy
         for (uint8_t attempt = 0; attempt < 10; attempt++) {
-            if (attempt > 0) {
-                LOG_DEBUG("lfs_erase: Retry attempt %u for page %u", attempt + 1, page_number);
-            }
+            // CRITICAL: Disable logging during flash operations to prevent buffer corruption
             err_code = sd_flash_page_erase(page_number);
             
-            LOG_DEBUG("lfs_erase: sd_flash_page_erase returned 0x%08X for page %u (attempt %u)", err_code, page_number, attempt + 1);
+            // CRITICAL: Disable logging during flash operations to prevent buffer corruption
             
             if (err_code == NRF_SUCCESS) {
                 if (use_async) {
@@ -451,8 +447,13 @@ namespace ExtendedNodeDBFS
                             }
                             
                             // Yield CPU to allow other tasks and interrupts to be processed
+                            // CRITICAL: Call nrf52Loop() to process SoftDevice events and feed watchdog
+                            // This matches native logic where nrf52Loop() is called from loop()
                             if (!success) {
                                 yield();  // Minimal delay to yield CPU
+                                #ifdef ARCH_NRF52
+                                nrf52Loop();  // Process SoftDevice events and feed watchdog
+                                #endif
                             } else {
                                 break;  // Success found, exit immediately
                             }
@@ -482,12 +483,10 @@ namespace ExtendedNodeDBFS
                     // SoftDevice not enabled - operation is synchronous, no event needed
                     // Just verify the operation completed by checking if we can proceed
                     // Note: According to SoftDevice docs, if SD is disabled, operation completes immediately
-                    uint32_t erase_time = millis() - erase_start_time;
-                    LOG_DEBUG("lfs_erase: Page %u erased synchronously in %u ms", page_number, erase_time);
+                    // CRITICAL: Disable logging during flash operations to prevent buffer corruption
                     return LFS_ERR_OK;
                 }
-                uint32_t erase_time = millis() - erase_start_time;
-                LOG_DEBUG("lfs_erase: Page %u erased successfully in %u ms (async)", page_number, erase_time);
+                // CRITICAL: Disable logging during flash operations to prevent buffer corruption
                 return LFS_ERR_OK;
             } else if (err_code == NRF_ERROR_BUSY) {
                 delay(50);
@@ -643,12 +642,8 @@ namespace ExtendedNodeDBFS
                 bool erase_success = false;
                 uint32_t page_attempts = 0;
                 
-                // Log progress every 10 pages or for first/last pages
-                if ((page_number - first_page) % 10 == 0 || page_number == first_page || page_number == last_page) {
-                    LOG_INFO("Erasing page %u/%u (address: 0x%08X) - progress: %u%%...", 
-                             page_number, last_page, page_number * FLASH_NRF52_PAGE_SIZE,
-                             ((page_number - first_page + 1) * 100) / total_pages);
-                }
+                // CRITICAL: Disable logging during flash operations to prevent buffer corruption
+                // Progress logging removed to prevent log buffer corruption
                 
                 // Retry if busy (up to 10 attempts)
                 for (uint8_t attempt = 0; attempt < 10; attempt++) {
@@ -727,11 +722,7 @@ namespace ExtendedNodeDBFS
                         
                         if (erase_success) {
                             pages_erased++;
-                            uint32_t page_time = millis() - page_start_time;
-                            if (page_time > 100 || (page_number - first_page) % 10 == 0) {
-                                LOG_DEBUG("Page %u erased successfully in %u ms (attempts: %u)", 
-                                         page_number, page_time, page_attempts);
-                            }
+                            // CRITICAL: Disable logging during flash operations to prevent buffer corruption
                             break;
                         }
                     } else {
@@ -762,8 +753,10 @@ namespace ExtendedNodeDBFS
             LOG_INFO("  - Pages erased successfully: %u", pages_erased);
             LOG_INFO("  - Pages failed: %u", pages_failed);
             LOG_INFO("  - Total attempts: %u", total_attempts);
-            LOG_INFO("  - Total time: %u ms (%.2f seconds)", total_erase_time, total_erase_time / 1000.0f);
-            LOG_INFO("  - Average time per page: %.1f ms", total_pages > 0 ? (float)total_erase_time / total_pages : 0.0f);
+            // Avoid float formatting to prevent log buffer corruption
+            LOG_INFO("  - Total time: %u ms (%u.%02u seconds)", total_erase_time, total_erase_time / 1000, (total_erase_time % 1000) / 10);
+            uint32_t avg_ms = total_pages > 0 ? total_erase_time / total_pages : 0;
+            LOG_INFO("  - Average time per page: %u ms", avg_ms);
             
             if (pages_failed == 0) {
                 LOG_INFO("STATUS: SUCCESS - All pages erased successfully!");
@@ -835,62 +828,32 @@ namespace ExtendedNodeDBFS
             LOG_WARN("Reason: %s", 
                      mount_result != LFS_ERR_OK ? "Mount failed" :
                      "Version mismatch or missing version file");
-            LOG_WARN("Step 1: Erasing all pages before format...");
             
             // CRITICAL: Erase all pages before formatting to avoid "Bad block" errors
-            uint32_t reformat_start_time = millis();
             bool erase_success = eraseExtendedFSPages();
-            uint32_t erase_time = millis() - reformat_start_time;
             
             if (!erase_success) {
-                LOG_ERROR("========================================");
                 LOG_ERROR("ERASE FAILED - Cannot proceed with format!");
-                LOG_ERROR("Total erase time: %u ms", erase_time);
-                LOG_ERROR("========================================");
                 return false;
             }
-            
-            LOG_INFO("========================================");
-            LOG_INFO("ERASE COMPLETED SUCCESSFULLY");
-            LOG_INFO("  - Total erase time: %u ms (%.2f seconds)", erase_time, erase_time / 1000.0f);
-            LOG_INFO("========================================");
             
             // Format filesystem
-            LOG_INFO("Step 2: Formatting extended filesystem...");
-            uint32_t format_start_time = millis();
             int format_result = lfs_format(&extended_lfs, &extended_lfs_cfg);
-            uint32_t format_time = millis() - format_start_time;
             
             if (format_result != LFS_ERR_OK) {
-                LOG_ERROR("========================================");
-                LOG_ERROR("FORMAT FAILED!");
-                LOG_ERROR("  - Error code: %d", format_result);
-                LOG_ERROR("  - Format time: %u ms", format_time);
-                LOG_ERROR("========================================");
+                LOG_ERROR("FORMAT FAILED! Error code: %d", format_result);
                 return false;
             }
-            
-            LOG_INFO("Format completed successfully in %u ms", format_time);
             
             // Mount again after format
-            LOG_INFO("Step 3: Mounting extended filesystem after format...");
-            uint32_t mount_start_time = millis();
             mount_result = lfs_mount(&extended_lfs, &extended_lfs_cfg);
-            uint32_t mount_time = millis() - mount_start_time;
             
             if (mount_result != LFS_ERR_OK) {
-                LOG_ERROR("========================================");
-                LOG_ERROR("MOUNT FAILED AFTER FORMAT!");
-                LOG_ERROR("  - Error code: %d", mount_result);
-                LOG_ERROR("  - Mount time: %u ms", mount_time);
-                LOG_ERROR("========================================");
+                LOG_ERROR("MOUNT FAILED AFTER FORMAT! Error code: %d", mount_result);
                 return false;
             }
             
-            LOG_INFO("Mount completed successfully in %u ms", mount_time);
-            
             // Create version file
-            LOG_INFO("Step 4: Creating version file...");
             lfs_file_t version_file;
             int create_result = lfs_file_open(&extended_lfs, &version_file, VERSION_FILE, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
             
@@ -900,23 +863,14 @@ namespace ExtendedNodeDBFS
                 lfs_ssize_t write_result = lfs_file_write(&extended_lfs, &version_file, version_str, strlen(version_str));
                 lfs_file_close(&extended_lfs, &version_file);
                 
-                if (write_result > 0) {
-                    LOG_INFO("Version file created successfully: version %u (%d bytes)", EXPECTED_VERSION, (int)write_result);
-                } else {
-                    LOG_WARN("Failed to write version file (wrote %d bytes)", (int)write_result);
+                if (write_result <= 0) {
+                    LOG_WARN("Failed to write version file");
                 }
             } else {
                 LOG_WARN("Failed to create version file (error: %d)", create_result);
             }
             
-            uint32_t total_reformat_time = millis() - reformat_start_time;
-            LOG_INFO("========================================");
             LOG_INFO("REFORMAT COMPLETED SUCCESSFULLY");
-            LOG_INFO("  - Total time: %u ms (%.2f seconds)", total_reformat_time, total_reformat_time / 1000.0f);
-            LOG_INFO("  - Erase time: %u ms", erase_time);
-            LOG_INFO("  - Format time: %u ms", format_time);
-            LOG_INFO("  - Mount time: %u ms", mount_time);
-            LOG_INFO("========================================");
         }
         
         isMounted = true;
@@ -971,14 +925,8 @@ namespace ExtendedNodeDBFS
         
         // Unmount if mounted
         if (isMounted) {
-            LOG_INFO("Step 0: Unmounting filesystem...");
-            uint32_t unmount_start = millis();
             lfs_unmount(&extended_lfs);
-            uint32_t unmount_time = millis() - unmount_start;
-            LOG_INFO("Step 0 SUCCESS: Filesystem unmounted (took %u ms)", unmount_time);
             isMounted = false;
-        } else {
-            LOG_INFO("Step 0: Filesystem not mounted, skipping unmount");
         }
         
         // Reset initialization flag
@@ -1087,43 +1035,28 @@ namespace ExtendedNodeDBFS
         };
         
         // Erase all pages
-        LOG_INFO("Step 1: Erasing all pages in extended filesystem region...");
-        uint32_t erase_start = millis();
         if (!eraseExtendedFSPages()) {
-            uint32_t erase_time = millis() - erase_start;
-            LOG_ERROR("Step 1 FAILED: Failed to erase pages before force reformat (took %u ms)!", erase_time);
+            LOG_ERROR("Failed to erase pages before force reformat!");
             return false;
         }
-        uint32_t erase_time = millis() - erase_start;
-        LOG_INFO("Step 1 SUCCESS: All pages erased (took %u ms)", erase_time);
         
         // Format filesystem
-        LOG_INFO("Step 2: Formatting extended filesystem...");
-        uint32_t format_start = millis();
         int format_result = lfs_format(&extended_lfs, &extended_lfs_cfg);
-        uint32_t format_time = millis() - format_start;
         
         if (format_result != LFS_ERR_OK) {
-            LOG_ERROR("Step 2 FAILED: Extended filesystem format failed (error: %d, took %u ms)!", format_result, format_time);
+            LOG_ERROR("Extended filesystem format failed (error: %d)!", format_result);
             return false;
         }
-        LOG_INFO("Step 2 SUCCESS: Filesystem formatted (took %u ms)", format_time);
         
         // Mount after format
-        LOG_INFO("Step 3: Mounting extended filesystem after format...");
-        uint32_t mount_start = millis();
         int mount_result = lfs_mount(&extended_lfs, &extended_lfs_cfg);
-        uint32_t mount_time = millis() - mount_start;
         
         if (mount_result != LFS_ERR_OK) {
-            LOG_ERROR("Step 3 FAILED: Extended filesystem mount failed after format (error: %d, took %u ms)!", mount_result, mount_time);
+            LOG_ERROR("Extended filesystem mount failed after format (error: %d)!", mount_result);
             return false;
         }
-        LOG_INFO("Step 3 SUCCESS: Filesystem mounted (took %u ms)", mount_time);
         
         // Create version file
-        LOG_INFO("Step 4: Creating version file...");
-        uint32_t version_start = millis();
         constexpr const char* VERSION_FILE = "/.extended_fs_version";
         constexpr uint32_t EXPECTED_VERSION = 1;
         
@@ -1136,30 +1069,17 @@ namespace ExtendedNodeDBFS
             lfs_ssize_t write_result = lfs_file_write(&extended_lfs, &version_file, version_str, strlen(version_str));
             lfs_file_close(&extended_lfs, &version_file);
             
-            uint32_t version_time = millis() - version_start;
-            if (write_result > 0) {
-                LOG_INFO("Step 4 SUCCESS: Version file created successfully: version %u (%d bytes, took %u ms)", 
-                        EXPECTED_VERSION, (int)write_result, version_time);
-            } else {
-                LOG_WARN("Step 4 PARTIAL: Failed to write version file (wrote %d bytes, took %u ms)", (int)write_result, version_time);
+            if (write_result <= 0) {
+                LOG_WARN("Failed to write version file");
             }
         } else {
-            uint32_t version_time = millis() - version_start;
-            LOG_WARN("Step 4 PARTIAL: Failed to create version file (error: %d, took %u ms)", create_result, version_time);
+            LOG_WARN("Failed to create version file (error: %d)", create_result);
         }
         
         isMounted = true;
         isInitialized = true;
         
-        uint32_t total_time = millis() - force_reformat_start;
-        LOG_INFO("========================================");
         LOG_INFO("FORCE REFORMAT COMPLETED SUCCESSFULLY");
-        LOG_INFO("========================================");
-        LOG_INFO("Total time: %u ms (%.2f seconds)", total_time, total_time / 1000.0f);
-        LOG_INFO("  - Erase time: %u ms", erase_time);
-        LOG_INFO("  - Format time: %u ms", format_time);
-        LOG_INFO("  - Mount time: %u ms", mount_time);
-        LOG_INFO("========================================");
         
         return true;
     }
@@ -1217,10 +1137,22 @@ static bool lfs_writecb(pb_ostream_t *stream, const pb_byte_t *buf, size_t count
 
 /**
  * @brief Load protobuf from extended filesystem
+ * 
+ * CRITICAL OPTIMIZATION: This function ignores the protoSize parameter and uses
+ * the actual file size instead. This prevents excessive memory allocation when
+ * getMaxNodesAllocatedSize() (227KB) is passed but the file is only 3 bytes.
+ * 
+ * @param filename File path to load
+ * @param protoSize Expected size (IGNORED - uses actual file size instead)
+ * @param objSize Size of destination object
+ * @param fields Protobuf field descriptors
+ * @param dest_struct Destination structure pointer
+ * @return LoadFileResult indicating success or failure
  */
 LoadFileResult loadFromExtendedFS(const char *filename, size_t protoSize, size_t objSize, 
                                   const pb_msgdesc_t *fields, void *dest_struct)
 {
+    (void)protoSize;  // Ignore protoSize - use actual file size instead to prevent excessive allocation
     LoadFileResult state = LoadFileResult::OTHER_FAILURE;
     
     // Use extended filesystem for nodes.proto
@@ -1231,81 +1163,54 @@ LoadFileResult loadFromExtendedFS(const char *filename, size_t protoSize, size_t
     if (extended_lfs) {
         // Read file into buffer first, then decode (more reliable than using readcb wrapper)
         // This avoids compatibility issues with File* vs LittleFSFileWrapper*
-        LOG_DEBUG("Load: Step 1: Opening file '%s' for reading from extended filesystem...", filename);
-        uint32_t load_start_time = millis();
         lfs_file_t file;
-        uint32_t open_start = millis();
         int open_result = lfs_file_open(extended_lfs, &file, filename, LFS_O_RDONLY);
-        uint32_t open_time = millis() - open_start;
         
         if (open_result == LFS_ERR_OK) {
-            LOG_DEBUG("Load: Step 1 SUCCESS: File '%s' opened (took %u ms)", filename, open_time);
-            
             // Get file size
-            LOG_DEBUG("Load: Step 2: Getting file size for '%s'...", filename);
-            uint32_t size_start = millis();
             lfs_soff_t file_size = lfs_file_size(extended_lfs, &file);
-            uint32_t size_time = millis() - size_start;
             
             if (file_size >= 0 && file_size <= 512 * 1024) {  // Max 512 KB (safety limit)
-                LOG_DEBUG("Load: Step 2 SUCCESS: File '%s' size: %d bytes (took %u ms)", filename, (int)file_size, size_time);
-                
                 // Allocate buffer for file content
-                LOG_DEBUG("Load: Step 3: Allocating buffer for '%s' (%d bytes)...", filename, (int)file_size);
-                uint32_t alloc_start = millis();
                 uint8_t* file_buffer = (uint8_t*)malloc(file_size);
-                uint32_t alloc_time = millis() - alloc_start;
                 
                 if (file_buffer) {
-                    LOG_DEBUG("Load: Step 3 SUCCESS: Buffer allocated (took %u ms)", alloc_time);
-                    
                     // Read entire file
-                    LOG_DEBUG("Load: Step 4: Reading %d bytes from '%s'...", (int)file_size, filename);
-                    uint32_t read_start = millis();
                     lfs_ssize_t read_result = lfs_file_read(extended_lfs, &file, file_buffer, file_size);
-                    uint32_t read_time = millis() - read_start;
                     lfs_file_close(extended_lfs, &file);
                     
                     if (read_result == file_size) {
-                        LOG_DEBUG("Load: Step 4 SUCCESS: Read %d bytes (took %u ms)", (int)read_result, read_time);
-                        
                         // Decode from buffer
-                        LOG_DEBUG("Load: Step 5: Decoding protobuf from '%s'...", filename);
-                        uint32_t decode_start = millis();
                         pb_istream_t stream = pb_istream_from_buffer(file_buffer, file_size);
                         memset(dest_struct, 0, objSize);
                         if (!pb_decode(&stream, fields, dest_struct)) {
-                            LOG_ERROR("Load: Step 5 FAILED: Can't decode protobuf %s: %s", filename, PB_GET_ERROR(&stream));
+                            LOG_ERROR("Can't decode protobuf %s: %s", filename, PB_GET_ERROR(&stream));
                             state = LoadFileResult::DECODE_FAILED;
                         } else {
-                            uint32_t decode_time = millis() - decode_start;
-                            uint32_t total_time = millis() - load_start_time;
-                            LOG_INFO("Load: Step 5 SUCCESS: Loaded %s successfully from EXTENDED filesystem (%d bytes, decode: %u ms, total: %u ms)", 
-                                    filename, (int)file_size, decode_time, total_time);
+                            LOG_INFO("Loaded %s successfully from EXTENDED filesystem (%d bytes)", 
+                                    filename, (int)file_size);
                             state = LoadFileResult::LOAD_SUCCESS;
                         }
                     } else {
-                        LOG_ERROR("Load: Step 4 FAILED: Read %d of %d bytes from '%s' (took %u ms)", 
-                                 (int)read_result, (int)file_size, filename, read_time);
+                        LOG_ERROR("Read %d of %d bytes from '%s'", 
+                                 (int)read_result, (int)file_size, filename);
                         state = LoadFileResult::OTHER_FAILURE;
                     }
                     free(file_buffer);
                 } else {
-                    LOG_ERROR("Load: Step 3 FAILED: Failed to allocate buffer for '%s' (size: %d bytes, took %u ms)", 
-                             filename, (int)file_size, alloc_time);
+                    LOG_ERROR("Failed to allocate buffer for '%s' (size: %d bytes)", 
+                             filename, (int)file_size);
                     lfs_file_close(extended_lfs, &file);
                     state = LoadFileResult::OTHER_FAILURE;
                 }
             } else {
-                LOG_ERROR("Load: Step 2 FAILED: File '%s' size invalid or too large: %d bytes (took %u ms)", 
-                         filename, (int)file_size, size_time);
+                LOG_ERROR("File '%s' size invalid or too large: %d bytes", 
+                         filename, (int)file_size);
                 lfs_file_close(extended_lfs, &file);
                 state = LoadFileResult::OTHER_FAILURE;
             }
         } else {
             // File doesn't exist - normal for first boot, will be created on first save
-            LOG_DEBUG("Load: Step 1: File '%s' not found in extended filesystem (error: %d, took %u ms, will be created on first save)", 
-                     filename, open_result, open_time);
             state = LoadFileResult::OTHER_FAILURE;  // Return failure so standard code can handle first boot
         }
     } else {
@@ -1342,8 +1247,6 @@ bool saveToExtendedFS(const char *filename, size_t protoSize, const pb_msgdesc_t
     // Use streaming encoding instead: encode directly to file, no buffer allocation needed!
     // This avoids memory fragmentation issues when free heap is fragmented.
     
-    LOG_DEBUG("Opening %s for writing in extended filesystem (streaming, no buffer)...", filename);
-    
     // Ensure directory exists (e.g., /prefs/ for /prefs/nodes.proto)
     const char* slash = filename;
     if (slash[0] == '/') {
@@ -1356,21 +1259,14 @@ bool saveToExtendedFS(const char *filename, size_t protoSize, const pb_msgdesc_t
             memcpy(dir_path, filename, dir_len);
             dir_path[dir_len] = '\0';
             int mkdir_result = lfs_mkdir(extended_lfs, dir_path);
-            if (mkdir_result != LFS_ERR_OK && mkdir_result != LFS_ERR_EXIST) {
-                LOG_DEBUG("Failed to create directory '%s' in extended FS (error: %d), continuing...", dir_path, mkdir_result);
-            }
+            (void)mkdir_result;  // Ignore errors - directory may already exist
         }
         slash++; // move past '/'
     }
     
     // Remove old file first (for atomic write)
     // This is safer than truncate - avoids issues with block allocation
-    int remove_result = lfs_remove(extended_lfs, filename);
-    if (remove_result == LFS_ERR_OK) {
-        LOG_DEBUG("Removed old file '%s' before write", filename);
-    } else if (remove_result != LFS_ERR_NOENT) {
-        LOG_DEBUG("Failed to remove old file '%s' (error: %d), continuing...", filename, remove_result);
-    }
+    lfs_remove(extended_lfs, filename);  // Ignore result - file may not exist
     
     // Open file for writing (create new file)
     lfs_file_t file;
@@ -1384,8 +1280,6 @@ bool saveToExtendedFS(const char *filename, size_t protoSize, const pb_msgdesc_t
         return false;
     }
     
-    LOG_DEBUG("File opened successfully, encoding protobuf with streaming (expected size: %u)...", (unsigned)protoSize);
-    
     // Use streaming encoding - no buffer allocation needed!
     // This avoids memory fragmentation issues when free heap is fragmented
     LfsFileContext ctx;
@@ -1394,96 +1288,72 @@ bool saveToExtendedFS(const char *filename, size_t protoSize, const pb_msgdesc_t
     
     pb_ostream_t stream = {&lfs_writecb, &ctx, SIZE_MAX, 0};
     
-    LOG_DEBUG("Step 3: Encoding and writing protobuf to file '%s' (streaming, no buffer)...", filename);
-    uint32_t encode_start = millis();
     bool encode_success = pb_encode(&stream, fields, dest_struct);
-    uint32_t encode_time = millis() - encode_start;
     
     if (!encode_success) {
         const char* error = PB_GET_ERROR(&stream);
-        LOG_ERROR("Step 3 FAILED: Protobuf encoding failed: %s (took %u ms)", error ? error : "unknown", encode_time);
+        LOG_ERROR("Protobuf encoding failed for '%s': %s", filename, error ? error : "unknown");
         lfs_file_close(extended_lfs, &file);
-        // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
         return false;
     }
     
     size_t encoded_size = stream.bytes_written;
-    LOG_DEBUG("Step 3 SUCCESS: Encoded and wrote %u bytes to file '%s' (streaming, took %u ms)", 
-             (unsigned)encoded_size, filename, encode_time);
     
     // Check if write was successful by checking file size
     lfs_soff_t file_size = lfs_file_size(extended_lfs, &file);
     if (file_size < 0 || (size_t)file_size != encoded_size) {
-        LOG_ERROR("Step 3 VERIFICATION FAILED: File size mismatch! Expected %u bytes, got %d", 
-                 (unsigned)encoded_size, (int)file_size);
+        LOG_ERROR("File size mismatch for '%s': expected %u bytes, got %d", 
+                 filename, (unsigned)encoded_size, (int)file_size);
         lfs_file_close(extended_lfs, &file);
-        // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
         return false;
     }
     
     // Sync file before closing (CRITICAL for LittleFS)
-    LOG_DEBUG("Step 4: Syncing file '%s'...", filename);
-    uint32_t sync_start = millis();
+    // CRITICAL: lfs_file_sync() can take 200+ ms and internally calls lfs_prog()
+    // We need to call nrf52Loop() periodically during sync to process SoftDevice events and feed watchdog
+    #ifdef ARCH_NRF52
+    nrf52Loop();  // Process any pending SoftDevice events before sync
+    #endif
     int sync_result = lfs_file_sync(extended_lfs, &file);
-    uint32_t sync_time = millis() - sync_start;
+    #ifdef ARCH_NRF52
+    nrf52Loop();  // Process any pending SoftDevice events after sync
+    #endif
     if (sync_result != LFS_ERR_OK) {
-        LOG_ERROR("Step 4 FAILED: Sync of '%s' failed (error: %d, took %u ms)", filename, sync_result, sync_time);
+        LOG_ERROR("Sync of '%s' failed (error: %d)", filename, sync_result);
         lfs_file_close(extended_lfs, &file);
-        // NO FALLBACK: Extended filesystem failed, nodes.proto won't be saved
         return false;
     }
-    LOG_DEBUG("Step 4 SUCCESS: File synced (took %u ms)", sync_time);
     
     // Close file
-    LOG_DEBUG("Step 5: Closing file '%s'...", filename);
-    uint32_t close_start = millis();
     int close_result = lfs_file_close(extended_lfs, &file);
-    uint32_t close_time = millis() - close_start;
     if (close_result != LFS_ERR_OK) {
-        LOG_WARN("Step 5 FAILED: Close of '%s' failed (error: %d, took %u ms)", filename, close_result, close_time);
-        okay = false;  // Mark as failed if close fails
+        LOG_WARN("Close of '%s' failed (error: %d)", filename, close_result);
+        okay = false;
     } else {
-        LOG_DEBUG("Step 5 SUCCESS: File '%s' closed (took %u ms)", filename, close_time);
-        okay = true;  // Mark as successful after all steps completed
+        okay = true;
     }
     
     if (okay) {
         LOG_INFO("Saved %s successfully to EXTENDED filesystem (%u bytes)", filename, (unsigned)encoded_size);
         
         // Verify file was saved to extended filesystem and NOT to main filesystem
-        LOG_DEBUG("VERIFY: Step 1: Checking if '%s' exists in extended filesystem...", filename);
-        uint32_t verify_start = millis();
         bool found_in_extended = false;
         lfs_file_t verify_file;
         int verify_result = lfs_file_open(extended_lfs, &verify_file, filename, LFS_O_RDONLY);
         if (verify_result == LFS_ERR_OK) {
             found_in_extended = true;
-            lfs_soff_t file_size = lfs_file_size(extended_lfs, &verify_file);
             lfs_file_close(extended_lfs, &verify_file);
-            LOG_DEBUG("VERIFY: Step 1 SUCCESS: File '%s' found in extended FS (size: %d bytes)", filename, (int)file_size);
-        } else {
-            LOG_DEBUG("VERIFY: Step 1 FAILED: File '%s' not found in extended FS (error: %d)", filename, verify_result);
         }
         
-        LOG_DEBUG("VERIFY: Step 2: Checking if '%s' exists in main filesystem...", filename);
         bool found_in_main = FSCom.exists(filename);
-        if (found_in_main) {
-            LOG_DEBUG("VERIFY: Step 2: File '%s' found in main FS (this is WRONG for nodes.proto!)", filename);
-        } else {
-            LOG_DEBUG("VERIFY: Step 2 SUCCESS: File '%s' NOT in main FS (correct)", filename);
-        }
-        
-        uint32_t verify_time = millis() - verify_start;
         
         if (found_in_extended && !found_in_main) {
-            LOG_INFO("VERIFIED: %s correctly saved to EXTENDED filesystem (80 pages, 320 KB, verification took %u ms)", 
-                    filename, verify_time);
+            LOG_INFO("VERIFIED: %s correctly saved to EXTENDED filesystem (80 pages, 320 KB)", filename);
         } else if (found_in_main) {
             LOG_ERROR("VERIFY FAILED: %s was also found in MAIN filesystem - this should not happen!", filename);
             LOG_ERROR("nodes.proto should ONLY be in extended filesystem!");
         } else if (!found_in_extended) {
-            LOG_ERROR("VERIFY FAILED: %s not found in EXTENDED filesystem after save (verification took %u ms)!", 
-                     filename, verify_time);
+            LOG_ERROR("VERIFY FAILED: %s not found in EXTENDED filesystem after save!", filename);
         }
         
         return true;
@@ -1729,7 +1599,15 @@ public:
     {
         if (!isOpen) return false;
         
+        // CRITICAL: lfs_file_sync() can take 200+ ms and internally calls lfs_prog()
+        // We need to call nrf52Loop() periodically during sync to process SoftDevice events and feed watchdog
+        #ifdef ARCH_NRF52
+        nrf52Loop();  // Process any pending SoftDevice events before sync
+        #endif
         int result = lfs_file_sync(lfs, &file);
+        #ifdef ARCH_NRF52
+        nrf52Loop();  // Process any pending SoftDevice events after sync
+        #endif
         return (result == LFS_ERR_OK);
     }
 };
