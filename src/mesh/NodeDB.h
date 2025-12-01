@@ -218,7 +218,7 @@ class NodeDB
     }
 
     virtual meshtastic_NodeInfoLite *getMeshNode(NodeNum n);
-    size_t getNumMeshNodes() { return numMeshNodes; }
+    size_t getNumMeshNodes();
 
     UserLicenseStatus getLicenseStatus(uint32_t nodeNum);
 
@@ -289,6 +289,7 @@ class NodeDB
     bool saveChannelsToDisk();
     bool saveDeviceStateToDisk();
     bool saveNodeDatabaseToDisk();
+    void verifyNodeDatabaseFromDisk();
 };
 
 extern NodeDB *nodeDB;

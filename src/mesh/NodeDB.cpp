@@ -17,6 +17,13 @@
 #include "SPILock.h"
 #include "SafeFile.h"
 #include "TypeConversions.h"
+#ifdef USE_EXTENDED_FS_FOR_NODEDB
+#include "../../variants/rak4631_lite/filesystem/FilesystemUnified.h"  // Extended filesystem module
+#if defined(ARCH_NRF52) && defined(RAK_4631)
+// Unified NodeDB implementation (includes all components and patches)
+#include "../../variants/rak4631_lite/nodedb/NodeDBUnified.h"
+#endif
+#endif
 #include "error.h"
 #include "main.h"
 #include "mesh-pb-constants.h"
@@ -27,6 +34,12 @@
 #include <pb_decode.h>
 #include <pb_encode.h>
 #include <vector>
+
+#ifdef USE_EXTENDED_FS_FOR_NODEDB
+#if defined(ARCH_NRF52) && defined(RAK_4631)
+#include "../../variants/rak4631_lite/nodedb/NodeDBUnified.h"  // For callback to prevent vector expansion
+#endif
+#endif
 
 #ifdef ARCH_ESP32
 #if HAS_WIFI
@@ -50,6 +63,8 @@
 #ifdef ARCH_NRF52
 #include <bluefruit.h>
 #include <utility/bonding.h>
+// Forward declaration for nrf52Loop() (for PAUSE_ON_START mode)
+extern void nrf52Loop();
 #endif
 
 #if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_WIFI
@@ -163,8 +178,15 @@ bool meshtastic_NodeDatabase_callback(pb_istream_t *istream, pb_ostream_t *ostre
         meshtastic_NodeInfoLite node; // this gets good data
         std::vector<meshtastic_NodeInfoLite> *vec = (std::vector<meshtastic_NodeInfoLite> *)field->pData;
 
-        if (istream->bytes_left && pb_decode(istream, meshtastic_NodeInfoLite_fields, &node))
+        if (istream->bytes_left && pb_decode(istream, meshtastic_NodeInfoLite_fields, &node)) {
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+            // Use patched version from variant (handles persistent backend)
+            handleNodeInsertionForPersistentBackend(node, vec);
+#else
+            // Standard behavior: add to vector
             vec->push_back(node);
+#endif
+        }
     }
     return true;
 }
@@ -197,6 +219,8 @@ NodeDB::NodeDB()
     loadFromDisk();
     cleanupMeshDB();
 
+    // CRITICAL: Compute CRC AFTER loadFromDisk() but BEFORE any modifications
+    // This allows us to detect if data was modified during initialization
     uint32_t devicestateCRC = crc32Buffer(&devicestate, sizeof(devicestate));
     uint32_t nodeDatabaseCRC = crc32Buffer(&nodeDatabase, sizeof(nodeDatabase));
     uint32_t configCRC = crc32Buffer(&config, sizeof(config));
@@ -245,6 +269,15 @@ NodeDB::NodeDB()
     // Note! We do this after loading saved settings, so that if somehow an invalid nodenum was stored in preferences we won't
     // keep using that nodenum forever. Crummy guess at our nodenum (but we will check against the nodedb to avoid conflicts)
     pickNewNodeNum();
+
+    // CRITICAL: Update owner.id to match current node ID (generated from MAC address - hardware)
+    // This ensures owner.id always matches the node ID generated from hardware MAC address
+    // This fixes a bug where owner.id from device.proto could be outdated
+    // Only update automatic IDs (starting with '!') - user-set IDs (starting with '+') should not be overwritten
+    if (owner.id[0] == '!' || owner.id[0] == '\0') {
+        snprintf(owner.id, sizeof(owner.id), "!%08x", getNodeNum());
+        LOG_DEBUG("Updated owner.id from hardware MAC address: %s", owner.id);
+    }
 
     // Set our board type so we can share it with others
     owner.hw_model = HW_VENDOR;
@@ -300,9 +333,13 @@ NodeDB::NodeDB()
 
     // If node database has not been saved for the first time, save it now
 #ifdef FSCom
+    // For persistent backend, nodes are stored in individual files, not nodes.proto
+    // For standard mode, save nodes.proto if it doesn't exist
+    #ifndef USE_EXTENDED_FS_FOR_NODEDB
     if (!FSCom.exists(nodeDatabaseFileName)) {
         saveNodeDatabaseToDisk();
     }
+    #endif
 #endif
 
 #ifdef ARCH_ESP32
@@ -348,15 +385,6 @@ NodeDB::NodeDB()
         config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY;
     }
 
-    if (devicestateCRC != crc32Buffer(&devicestate, sizeof(devicestate)))
-        saveWhat |= SEGMENT_DEVICESTATE;
-    if (nodeDatabaseCRC != crc32Buffer(&nodeDatabase, sizeof(nodeDatabase)))
-        saveWhat |= SEGMENT_NODEDATABASE;
-    if (configCRC != crc32Buffer(&config, sizeof(config)))
-        saveWhat |= SEGMENT_CONFIG;
-    if (channelFileCRC != crc32Buffer(&channelFile, sizeof(channelFile)))
-        saveWhat |= SEGMENT_CHANNELS;
-
     if (config.position.gps_enabled) {
         config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_ENABLED;
         config.position.gps_enabled = 0;
@@ -386,6 +414,40 @@ NodeDB::NodeDB()
 #endif
     }
 #endif
+    
+    // CRITICAL: Check CRC AFTER all modifications to detect changes
+    // If CRC changed, data was modified and needs to be saved
+    // Also check if files exist (for first boot or factory reset)
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles CRC and file existence checks)
+    saveWhat = calculateSaveWhatFlags(devicestateCRC, nodeDatabaseCRC, configCRC, channelFileCRC, saveWhat);
+#else
+    // Standard behavior: check CRC and file existence
+    if (devicestateCRC != crc32Buffer(&devicestate, sizeof(devicestate)))
+        saveWhat |= SEGMENT_DEVICESTATE;
+    if (nodeDatabaseCRC != crc32Buffer(&nodeDatabase, sizeof(nodeDatabase)))
+        saveWhat |= SEGMENT_NODEDATABASE;
+    if (configCRC != crc32Buffer(&config, sizeof(config)))
+        saveWhat |= SEGMENT_CONFIG;
+    if (channelFileCRC != crc32Buffer(&channelFile, sizeof(channelFile)))
+        saveWhat |= SEGMENT_CHANNELS;
+    
+    #ifdef FSCom
+    if (!FSCom.exists(configFileName)) {
+        saveWhat |= SEGMENT_CONFIG;
+    }
+    if (!FSCom.exists(deviceStateFileName)) {
+        saveWhat |= SEGMENT_DEVICESTATE;
+    }
+    if (!FSCom.exists(moduleConfigFileName)) {
+        saveWhat |= SEGMENT_MODULECONFIG;
+    }
+    if (!FSCom.exists(channelFileName)) {
+        saveWhat |= SEGMENT_CHANNELS;
+    }
+    #endif
+#endif
+    
     saveToDisk(saveWhat);
 }
 
@@ -436,6 +498,42 @@ void NodeDB::resetRadioConfig(bool is_fresh_install)
 bool NodeDB::factoryReset(bool eraseBleBonds)
 {
     LOG_INFO("Perform factory reset!");
+    
+    // STEP 1: Disable radio to prevent incoming packets during factory reset
+    extern RadioInterface *rIf;
+    if (rIf) {
+        LOG_INFO("Disabling radio during factory reset...");
+        rIf->disable();  // This sets disabled=true and calls sleep()
+    }
+    
+    // STEP 2: Clear all NodeDB queues and caches BEFORE formatting Extended FS
+    // This prevents old data from being written to flash after format
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    if (NodeDBPersistentBackend::isEnabled()) {
+        LOG_INFO("Clearing NodeDB queues and caches before factory reset...");
+        
+        // Clear background task write queue (prevents old nodes from being written after format)
+        if (NodeDBBackgroundTask::isInitialized()) {
+            LOG_INFO("Clearing background task write queue...");
+            NodeDBBackgroundTask::clearWriteQueue();
+        }
+        
+        // Clear NodeCache (removes all cached nodes from RAM)
+        // clear() checks initialization internally, so safe to call
+        // CRITICAL: Skip flushDirtyNodes() during factory reset - Extended FS will be reformatted anyway
+        LOG_INFO("Clearing NodeCache...");
+        NodeCache::clear(false);  // false = don't flush dirty nodes (Extended FS will be reformatted)
+        
+        // Clear NodeIndex (removes all index entries from RAM)
+        // clear() checks index_entries internally, so safe to call
+        LOG_INFO("Clearing NodeIndex...");
+        NodeIndex::clear();
+        
+        LOG_INFO("NodeDB queues and caches cleared");
+    }
+#endif
+    
+    // STANDARD FACTORY RESET LOGIC (first, as in original firmware)
     // first, remove the "/prefs" (this removes most prefs)
     spiLock->lock();
     rmDir("/prefs"); // this uses spilock internally...
@@ -448,10 +546,95 @@ bool NodeDB::factoryReset(bool eraseBleBonds)
     spiLock->unlock();
     // second, install default state (this will deal with the duplicate mac address issue)
     installDefaultNodeDatabase();
+    
+    // MAIN FILESYSTEM RESET (BEFORE installDefaultDeviceState to prevent pickNewNodeNum from checking old nodes)
+    // Format Main FS BEFORE calling installDefaultDeviceState(), which calls pickNewNodeNum()
+    // This ensures pickNewNodeNum() won't find conflicts with old nodes in Main FS
+#ifdef USE_EXTENDED_FS_FOR_NODEDB
+    LOG_INFO("Clearing main filesystem for NodeDB (factory reset)...");
+    // For factory reset, we need to format the enlarged Main FS
+    // NodeDBPersistentBackend will handle node storage in Main FS
+    // Note: Main FS formatting is handled by initMainFS() during startup
+    // Here we just clear the node database in RAM
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Reset directory flag - Main FS will be reformatted on next boot
+    NodeStorage::resetDirectoryFlag();
+    
+    // CRITICAL: Clear old nodes from RAM after factory reset
+    // After factory reset, old nodes may still be in RAM from previous session
+    // Clear vector completely and ensure only local node exists
+    // For persistent backend, ensure vector only contains local node
+    // Clear all nodes first, then add local node properly
+    nodeDatabase.nodes.clear();
+    nodeDatabase.nodes.resize(1);  // Reserve space for local node only
+    nodeDatabase.nodes[0] = meshtastic_NodeInfoLite();  // Initialize as empty
+    numMeshNodes = 0;  // Will be set to 1 after local node is added
+    LOG_INFO("Node database cleared from RAM - Main FS will be reformatted on next boot");
+#endif
+#endif
+    
+    // CRITICAL: Reset my_node_num to 0 before installDefaultDeviceState()
+    // This ensures pickNewNodeNum() will generate a new ID from MAC address
+    // instead of reusing the old ID from RAM
+    LOG_INFO("Resetting node ID to 0 before generating new one from MAC address...");
+    myNodeInfo.my_node_num = 0;
+    
+    // Now install default device state (pickNewNodeNum() won't find conflicts in Extended FS - it's already formatted)
     installDefaultDeviceState();
     installDefaultConfig(!eraseBleBonds); // Also preserve the private key if we're not erasing BLE bonds
     installDefaultModuleConfig();
     installDefaultChannels();
+    resetRadioConfig(true); // Initialize channels immediately after reset to avoid "Invalid channel index" errors
+    
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // CRITICAL: Add local node to vector after installDefaultDeviceState()
+    // installDefaultDeviceState() sets owner data, but doesn't add node to vector
+    // Local node is normally added in NodeDB constructor, but during factoryReset()
+    // we need to add it explicitly
+    meshtastic_NodeInfoLite *info = getOrCreateMeshNode(getNodeNum());
+    if (info) {
+        info->user = TypeConversions::ConvertToUserLite(owner);
+        info->has_user = true;
+        info->num = getNodeNum();
+        numMeshNodes = 1;
+        
+        // CRITICAL: Mark node as dirty after filling user data
+        // This ensures user data (including MAC address) is saved to Extended FS
+        // Without this, node is saved with empty user data (only num), causing MAC address to be 0x0000
+        if (NodeDBPersistentBackend::isEnabled()) {
+            // CRITICAL: Ensure node is in persistent backend cache before marking as dirty
+            // getOrCreateMeshNode() may return node from vector, not from persistent backend cache
+            // We need to ensure node is in cache so markDirty() can find it
+            meshtastic_NodeInfoLite* backend_node = NodeDBPersistentBackend::getOrCreateNode(getNodeNum());
+            if (backend_node) {
+                // Update backend node with current data (including user info)
+                *backend_node = *info;
+                LOG_DEBUG("Updated persistent backend node 0x%x with user data (MAC: %02x:%02x:%02x:%02x:%02x:%02x)", 
+                         getNodeNum(), owner.macaddr[0], owner.macaddr[1], owner.macaddr[2], 
+                         owner.macaddr[3], owner.macaddr[4], owner.macaddr[5]);
+            }
+            
+            // Now mark as dirty (node should be in cache now)
+            NodeCache::markDirty(getNodeNum());
+            
+            // CRITICAL: After factory reset, explicitly flush dirty nodes to ensure they are saved to slot files
+            // This is needed because markDirty() only enqueues to background task, which may not complete before reboot
+            // Flushing ensures node is saved to Extended FS slot file immediately
+            LOG_DEBUG("Flushing dirty nodes after factory reset to ensure slot files are created...");
+            uint32_t flushed = NodeCache::flushDirtyNodes();
+            LOG_DEBUG("Flushed %u dirty node(s) to Extended FS slot files", flushed);
+            
+            LOG_DEBUG("Marked local node 0x%x as dirty after filling user data (MAC: %02x:%02x:%02x:%02x:%02x:%02x)", 
+                     getNodeNum(), owner.macaddr[0], owner.macaddr[1], owner.macaddr[2], 
+                     owner.macaddr[3], owner.macaddr[4], owner.macaddr[5]);
+        }
+        
+        LOG_INFO("Added local node 0x%x to vector after factory reset", getNodeNum());
+    } else {
+        LOG_WARN("Failed to add local node to vector after factory reset");
+    }
+#endif
+    
     // third, write everything to disk
     saveToDisk();
     if (eraseBleBonds) {
@@ -475,9 +658,21 @@ void NodeDB::installDefaultNodeDatabase()
 {
     LOG_DEBUG("Install default NodeDatabase");
     nodeDatabase.version = DEVICESTATE_CUR_VER;
+    
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend initialization)
+    if (initializeVirtualBackendForNodeDatabase(nodeDatabase, numMeshNodes, meshNodes)) {
+        return;  // Early return - virtual backend handles network nodes
+    }
+    // If virtual backend initialization failed, fall through to standard allocation
+    // Use patched version for standard allocation with memory checks
+    performStandardVectorAllocation(nodeDatabase, numMeshNodes, meshNodes, MAX_NUM_NODES);
+#else
+    // Standard allocation (for platforms without virtual backend)
     nodeDatabase.nodes = std::vector<meshtastic_NodeInfoLite>(MAX_NUM_NODES);
     numMeshNodes = 0;
     meshNodes = &nodeDatabase.nodes;
+#endif
 }
 
 void NodeDB::installDefaultConfig(bool preserveKey = false)
@@ -929,8 +1124,17 @@ void NodeDB::resetNodes()
 {
     if (!config.position.fixed_position)
         clearLocalPosition();
+    
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    NodeNum localNodeNum = getNodeNum();
+    resetNodesWithVirtualBackend(nodeDatabase, numMeshNodes, [localNodeNum]() { return localNodeNum; });
+#else
+    // Standard implementation
     numMeshNodes = 1;
     std::fill(nodeDatabase.nodes.begin() + 1, nodeDatabase.nodes.end(), meshtastic_NodeInfoLite());
+#endif
+
     devicestate.has_rx_text_message = false;
     devicestate.has_rx_waypoint = false;
     saveNodeDatabaseToDisk();
@@ -941,6 +1145,15 @@ void NodeDB::resetNodes()
 
 void NodeDB::removeNodeByNum(NodeNum nodeNum)
 {
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    NodeNum localNodeNum = getNodeNum();
+    if (removeNodeByNumWithVirtualBackend(nodeNum, [localNodeNum]() { return localNodeNum; })) {
+        return;  // Node was removed by virtual backend
+    }
+#endif
+
+    // Standard implementation: remove from vector
     int newPos = 0, removed = 0;
     for (int i = 0; i < numMeshNodes; i++) {
         if (meshNodes->at(i).num != nodeNum)
@@ -1053,6 +1266,7 @@ void NodeDB::pickNewNodeNum()
 LoadFileResult NodeDB::loadProto(const char *filename, size_t protoSize, size_t objSize, const pb_msgdesc_t *fields,
                                  void *dest_struct)
 {
+    // Standard implementation using Main FS (all files including nodes.proto now in Main FS)
     LoadFileResult state = LoadFileResult::OTHER_FAILURE;
 #ifdef FSCom
     concurrency::LockGuard g(spiLock);
@@ -1125,13 +1339,30 @@ void NodeDB::loadFromDisk()
         meshNodes = &nodeDatabase.nodes;
         numMeshNodes = nodeDatabase.nodes.size();
         LOG_INFO("Loaded saved nodedatabase version %d, with nodes count: %d", nodeDatabase.version, nodeDatabase.nodes.size());
+        
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+        // CRITICAL: Initialize virtual backend after loading nodes.proto file
+        // This ensures backend is ready BEFORE packets arrive, even if installDefaultNodeDatabase()
+        // was not called (because file version was valid)
+        initializePersistentBackendAfterLoad(nodeDatabase, numMeshNodes, meshNodes);
+#endif
     }
 
     if (numMeshNodes > MAX_NUM_NODES) {
         LOG_WARN("Node count %d exceeds MAX_NUM_NODES %d, truncating", numMeshNodes, MAX_NUM_NODES);
         numMeshNodes = MAX_NUM_NODES;
     }
+    
+    // CRITICAL OPTIMIZATION: Check available memory before resize to prevent allocation failure
+    // If vector is empty or small, resize might try to allocate MAX_NUM_NODES * sizeof(NodeInfoLite)
+    // which can be 227KB - too much for available memory (181KB free)
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52)
+    // Use patched version from variant (already included at top of file)
+    resizeMeshNodesSafely(meshNodes, numMeshNodes, MAX_NUM_NODES);
+#else
+    // Standard resize (for other platforms)
     meshNodes->resize(MAX_NUM_NODES);
+#endif
 
     // static DeviceState scratch; We no longer read into a tempbuf because this structure is 15KB of valuable RAM
     state = loadProto(deviceStateFileName, meshtastic_DeviceState_size, sizeof(meshtastic_DeviceState),
@@ -1278,13 +1509,14 @@ void NodeDB::loadFromDisk()
 bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
                        bool fullAtomic)
 {
-    bool okay = false;
+    // Standard implementation using Main FS (all files including nodes.proto now in Main FS)
 #ifdef FSCom
     auto f = SafeFile(filename, fullAtomic);
 
     LOG_INFO("Save %s", filename);
     pb_ostream_t stream = {&writecb, static_cast<Print *>(&f), protoSize};
 
+    bool okay = false;
     if (!pb_encode(&stream, fields, dest_struct)) {
         LOG_ERROR("Error: can't encode protobuf %s", PB_GET_ERROR(&stream));
     } else {
@@ -1295,11 +1527,13 @@ bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_
 
     if (!okay || !writeSucceeded) {
         LOG_ERROR("Can't write prefs!");
+        return false;
     }
+    return true;
 #else
     LOG_ERROR("ERROR: Filesystem not implemented");
+    return false;
 #endif
-    return okay;
 }
 
 bool NodeDB::saveChannelsToDisk()
@@ -1326,6 +1560,17 @@ bool NodeDB::saveDeviceStateToDisk()
 
 bool NodeDB::saveNodeDatabaseToDisk()
 {
+    // CRITICAL: If NodeDBPersistentBackend is enabled, nodes are stored in individual files (/nodes/slot_XXXX.bin)
+    // Do NOT save nodes.proto to avoid conflicts and filesystem corruption
+    #if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    if (NodeDBPersistentBackend::isEnabled()) {
+        LOG_DEBUG("NodeDB: Skipping nodes.proto save - NodeDBPersistentBackend handles node storage");
+        return true; // Return success - nodes are already saved by persistent backend
+    }
+    #endif
+    
+    // Standard implementation using Main FS (all files including nodes.proto now in Main FS)
+    // This function is used for standard mode or backward compatibility
 #ifdef FSCom
     spiLock->lock();
     FSCom.mkdir("/prefs");
@@ -1409,15 +1654,29 @@ bool NodeDB::saveToDisk(int saveWhat)
                                      : meshtastic_CriticalErrorCode_FLASH_CORRUPTION_UNRECOVERABLE);
     }
 
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    NODEDB_BACKGROUND_TICK();
+#endif
+
     return success;
 }
 
 const meshtastic_NodeInfoLite *NodeDB::readNextMeshNode(uint32_t &readIndex)
 {
-    if (readIndex < numMeshNodes)
+    // First, iterate through vector (local node)
+    if (readIndex < numMeshNodes) {
         return &meshNodes->at(readIndex++);
-    else
-        return NULL;
+    }
+
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    const meshtastic_NodeInfoLite* node = readNextMeshNodeWithVirtualBackend(readIndex, numMeshNodes, meshNodes);
+    if (node) {
+        return node;
+    }
+#endif
+
+    return NULL;
 }
 
 /// Given a node, return how many seconds in the past (vs now) that we last heard from it
@@ -1447,17 +1706,23 @@ uint32_t sinceReceived(const meshtastic_MeshPacket *p)
 
 size_t NodeDB::getNumOnlineMeshNodes(bool localOnly)
 {
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    // This function counts both vector and virtual backend nodes
+    return getNumOnlineMeshNodesWithVirtualBackend(numMeshNodes, meshNodes, localOnly, sinceLastSeen);
+#else
+    // Standard implementation
     size_t numseen = 0;
-
     // FIXME this implementation is kinda expensive
+    // First, check vector (local node)
     for (int i = 0; i < numMeshNodes; i++) {
         if (localOnly && meshNodes->at(i).via_mqtt)
             continue;
         if (sinceLastSeen(&meshNodes->at(i)) < NUM_ONLINE_SECS)
             numseen++;
     }
-
     return numseen;
+#endif
 }
 
 #include "MeshModule.h"
@@ -1632,6 +1897,15 @@ void NodeDB::updateFrom(const meshtastic_MeshPacket &mp)
     if (mp.which_payload_variant == meshtastic_MeshPacket_decoded_tag && mp.from) {
         LOG_DEBUG("Update DB node 0x%x, rx_time=%u", mp.from, mp.rx_time);
 
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+        // Use patched version from variant (handles virtual backend)
+        updateFromWithVirtualBackend(&mp, getFrom);
+        if (NodeDBPersistentBackend::isEnabled()) {
+            return;  // Persistent backend handled the update
+        }
+#endif
+        
+        // Original implementation
         meshtastic_NodeInfoLite *info = getOrCreateMeshNode(getFrom(&mp));
         if (!info) {
             return;
@@ -1666,22 +1940,57 @@ uint8_t NodeDB::getMeshNodeChannel(NodeNum n)
 /// NOTE: This function might be called from an ISR
 meshtastic_NodeInfoLite *NodeDB::getMeshNode(NodeNum n)
 {
+    // First, check vector (for local node)
     for (int i = 0; i < numMeshNodes; i++)
         if (meshNodes->at(i).num == n)
             return &meshNodes->at(i);
 
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    meshtastic_NodeInfoLite* node = getMeshNodeWithVirtualBackend(n, numMeshNodes, meshNodes);
+    if (node) {
+        return node;
+    }
+#endif
+
     return NULL;
+}
+
+size_t NodeDB::getNumMeshNodes()
+{
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    return getNumMeshNodesWithVirtualBackend(numMeshNodes);
+#endif
+    // Standard implementation: only vector nodes
+    return numMeshNodes;
 }
 
 // returns true if the maximum number of nodes is reached or we are running low on memory
 bool NodeDB::isFull()
 {
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles virtual backend)
+    return isFullWithVirtualBackend(numMeshNodes, MAX_NUM_NODES);
+#endif
+    // Standard implementation
     return (numMeshNodes >= MAX_NUM_NODES) || (memGet.getFreeHeap() < MINIMUM_SAFE_FREE_HEAP);
 }
 
 /// Find a node in our DB, create an empty NodeInfo if missing
 meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
 {
+#if defined(USE_EXTENDED_FS_FOR_NODEDB) && defined(ARCH_NRF52) && defined(RAK_4631)
+    // Use patched version from variant (handles lazy initialization of virtual backend)
+    NodeNum localNodeNum = getNodeNum();
+    meshtastic_NodeInfoLite* result = getOrCreateMeshNodeLazyInit(n, 
+                                                                  [localNodeNum]() { return localNodeNum; },
+                                                                  [this](NodeNum num) { return this->getMeshNode(num); });
+    if (result) {
+        return result;  // Virtual backend handled the node
+    }
+#endif
+    
     meshtastic_NodeInfoLite *lite = getMeshNode(n);
 
     if (!lite) {
@@ -1719,15 +2028,47 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                     meshNodes->at(i) = meshNodes->at(i + 1);
                 }
                 (numMeshNodes)--;
+                meshNodes->resize(numMeshNodes);
+            } else {
+                // If no node found to evict, try to evict the oldest non-favorite node
+                if (numMeshNodes > 1 && numMeshNodes >= MAX_NUM_NODES) {
+                    oldestIndex = 1;
+                    for (int i = oldestIndex; i < numMeshNodes - 1; i++) {
+                        meshNodes->at(i) = meshNodes->at(i + 1);
+                    }
+                    (numMeshNodes)--;
+                    meshNodes->resize(numMeshNodes);
+                } else if (numMeshNodes >= MAX_NUM_NODES) {
+                    LOG_ERROR("Cannot add node %u: database full (%u/%u nodes)", n, numMeshNodes, MAX_NUM_NODES);
+                    return nullptr;
+                }
             }
         }
-        // add the node at the end
-        lite = &meshNodes->at((numMeshNodes)++);
 
-        // everything is missing except the nodenum
-        memset(lite, 0, sizeof(*lite));
-        lite->num = n;
-        LOG_INFO("Adding node to database with %i nodes and %u bytes free!", numMeshNodes, memGet.getFreeHeap());
+        if (isFull()) {
+            LOG_ERROR("Cannot add node %u: database full (%u/%u nodes) or low memory (%u bytes free)", 
+                     n, numMeshNodes, MAX_NUM_NODES, memGet.getFreeHeap());
+            return nullptr;
+        }
+        
+        // Verify capacity before push_back() to prevent reallocation
+        if (meshNodes->size() != (size_t)numMeshNodes) {
+            meshNodes->resize(numMeshNodes);
+        }
+        
+        if (meshNodes->capacity() < (size_t)numMeshNodes + 1) {
+            meshNodes->reserve(MAX_NUM_NODES);
+            if (meshNodes->capacity() < (size_t)numMeshNodes + 1) {
+                LOG_ERROR("Failed to reserve memory for node %u", n);
+                return nullptr;
+            }
+        }
+        
+        meshtastic_NodeInfoLite newNode = {};
+        newNode.num = n;
+        meshNodes->push_back(newNode);
+        numMeshNodes++;
+        lite = &meshNodes->at(numMeshNodes - 1);
     }
 
     return lite;

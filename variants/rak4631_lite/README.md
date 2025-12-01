@@ -10,6 +10,7 @@ Custom Meshtastic firmware variant for RAK4631 with aggressive memory optimizati
 
 **Key Features (Base Variant):**
 - ✅ **256 nodes capacity** (vs standard 80 for NRF52)
+- ✅ **2,000-2,400 nodes capacity** (with virtual backend - see below, limited by RAM index size)
 - ✅ **Aggressive module exclusion** - ~40% firmware size reduction
 - ✅ **Memory optimizations** - minimal RAM usage for core functions
 
@@ -260,6 +261,37 @@ Flash: [====      ]  38.0% (used 395420 bytes from 1040384 bytes)
 
 ## Memory Management
 
+### Virtual NodeDB Backend (2,000-2,400 Nodes)
+
+**NEW:** Virtual backend architecture enables scaling to 2,000-2,400 nodes using RAM cache + flash backend (limited by RAM index size, not flash capacity).
+
+**Architecture:**
+- **Flash Backend**: Individual slots for 2,000-2,400 nodes (272 KB extended FS)
+- **RAM Cache**: 200-300 active nodes only (~50-75 KB RAM)
+- **Node Index**: Compact structure in RAM tracking all nodes (~24 KB for 1234 nodes, limited by MAX_NUM_NODES)
+- **Hot/Cold Split**: Critical routing fields in RAM, full data in flash
+
+**Key Features:**
+- Hot data (last_heard, snr) **NEVER written to flash** (updates 100-1000x/min, prevents wear)
+- Cold data (user, position) written via LittleFS with copy-on-write (automatic wear leveling)
+- Batch updates throttled to 1 minute (prevents excessive writes)
+- Protected nodes (local, routers, favorites) never evicted from cache
+
+**Memory Usage:**
+- Index: ~24 KB (1234 nodes × 16 bytes, limited by MAX_NUM_NODES; flash can store 2,000-2,400 nodes)
+- Cache: ~50-75 KB (200-300 nodes × 250 bytes)
+- **Total RAM**: ~75-100 KB (vs 64 KB for 256 nodes in RAM)
+- **Flash**: 272 KB extended FS (68 pages) for node storage (2,000-2,400 nodes capacity based on actual slot sizes: 69-82 bytes data + ~20-50 bytes LittleFS overhead = ~100-130 bytes per node)
+
+**Wear Leveling:**
+- Hot data updates don't touch flash (zero wear)
+- Cold data updates use LittleFS copy-on-write (automatic block rotation)
+- Each update creates new file, deletes old (distributed wear across blocks)
+
+**Status Display:**
+- `/mem` command shows: `Nodes: X/1234 (cache: Y/300)` (limited by MAX_NUM_NODES, flash can store 2,000-2,400)
+- `/nodes` command shows: `Total: X/1234 (cache: Y/300), Flash: Z slots free` (flash capacity: 2,000-2,400 nodes)
+
 ### Optional Dynamic Max Nodes Feature
 
 Requires the monitoring commit. When enabled:
@@ -268,14 +300,16 @@ Requires the monitoring commit. When enabled:
 3. Cannot decrease below the default limit (safety)
 4. Persists across reboots (saved to flash)
 
-**Memory calculation:**
+**Note:** With virtual backend, `dynamic_max_nodes` now means "RAM cache size" (not total limit).
+
+**Memory calculation (without virtual backend):**
 - Each node: ~250 bytes RAM
 - 256 nodes = 64KB RAM
 - 300 nodes = 75KB RAM (safe)
 - 350 nodes = 87.5KB RAM (risky)
 - 400+ nodes = 100KB+ RAM (dangerous!)
 
-**Safe limits:**
+**Safe limits (without virtual backend):**
 - Conservative: 256 nodes (25% RAM)
 - Aggressive: 300 nodes (29% RAM)
 - Maximum safe: 350 nodes (34% RAM)
@@ -286,7 +320,7 @@ Requires the monitoring commit. When enabled:
 | Queue | Standard | Optimized | Purpose |
 |-------|----------|-----------|---------|
 | `MAX_RX_TOPHONE` | 32 | 4 | Phone connection buffer |
-| `MAX_RX_FROMRADIO` | 4 | 4 | Radio RX buffer |
+| `MAX_RX_FROMRADIO` | 4 | 16 | Radio RX buffer (increased to prevent queue overflow) |
 | `MAX_TX_QUEUE` | 16 | 16 | Radio TX buffer |
 
 **Optimization rationale:**
@@ -452,6 +486,7 @@ To update to new Meshtastic version:
 |---------|------|---------|
 | 1.0 | 2024-10 | Base variant with 256 nodes and aggressive module exclusion |
 | 1.1 | 2024-10 | Optional monitoring add-on (DeviceStatsModule + dynamic scaling) |
+| 2.0 | 2024-12 | Virtual NodeDB backend: 2,000-2,400 nodes with RAM cache + flash backend |
 
 ---
 
@@ -468,6 +503,157 @@ To update to new Meshtastic version:
 - [ ] Add more monitoring commands
 - [ ] Optimize RAM usage further
 - [ ] Support other nRF52 devices
+
+---
+
+## ⚠️ Critical Coding Guidelines - Preventing System Hangs
+
+**IMPORTANT:** When modifying code that interacts with flash memory or filesystem operations, follow these rules to prevent system hangs and log corruption:
+
+### 1. **NEVER Log During Flash Operations**
+
+**Problem:** Logging during flash read/write/erase operations corrupts the static `printBuf[160]` buffer in `RedirectablePrint::vprintf`, causing garbled output (`` instead of numbers).
+
+**Rule:** 
+- ❌ **DO NOT** use `LOG_DEBUG`, `LOG_INFO`, `LOG_WARN`, or `LOG_ERROR` inside:
+  - `lfs_read()` callback
+  - `lfs_prog()` callback  
+  - `lfs_erase()` callback
+  - Any function that performs direct flash operations
+- ✅ **DO** log errors only if absolutely critical (use minimal logging)
+- ✅ **DO** log before/after flash operations, not during
+
+**Example (WRONG):**
+```cpp
+static int lfs_prog(...) {
+    LOG_DEBUG("Writing %u bytes...", size);  // ❌ DON'T DO THIS!
+    sd_flash_write(...);
+    LOG_DEBUG("Write completed");  // ❌ DON'T DO THIS!
+}
+```
+
+**Example (CORRECT):**
+```cpp
+static int lfs_prog(...) {
+    // CRITICAL: Disable logging during flash operations
+    sd_flash_write(...);
+    return LFS_ERR_OK;
+}
+```
+
+### 2. **NEVER Pre-Erase All Pages Before Formatting**
+
+**Problem:** Erasing 68 pages (272 KB) takes 7-9 seconds, causing:
+- Watchdog timeouts
+- System overload
+- Log buffer corruption
+- Device hangs on reboot
+
+**Rule:**
+- ❌ **DO NOT** call `eraseExtendedFSPages()` or similar functions in `init()`
+- ❌ **DO NOT** erase all pages before `lfs_format()`
+- ✅ **DO** let LittleFS erase pages automatically via `lfs_erase()` callback
+- ✅ **DO** only erase pages when absolutely necessary (e.g., corruption recovery)
+
+**Why:** LittleFS format automatically erases needed pages via the `lfs_erase` callback. Pre-erasing is unnecessary and causes system overload.
+
+### 3. **Always Feed Watchdog During Long Operations**
+
+**Problem:** Long operations (>5 seconds) can trigger watchdog reset.
+
+**Rule:**
+- ✅ **DO** call `::nrf52Loop()` and `yield()` frequently during:
+  - Filesystem initialization
+  - Format operations
+  - Large file reads/writes
+  - Directory scanning
+- ✅ **DO** feed watchdog at least every 2-3 seconds
+- ✅ **DO** feed watchdog before/after each flash operation
+
+**Example:**
+```cpp
+for (uint32_t i = 0; i < count; i++) {
+    #ifdef ARCH_NRF52
+    ::nrf52Loop();  // Feed watchdog
+    yield();        // Allow other tasks
+    #endif
+    // ... perform operation ...
+}
+```
+
+### 4. **Avoid Stack Overflow in Flash Callbacks**
+
+**Problem:** Flash callbacks are called from interrupt context or deep call stacks.
+
+**Rule:**
+- ✅ **DO** use static/global buffers instead of large stack arrays
+- ✅ **DO** keep callback functions small and simple
+- ❌ **DO NOT** allocate large arrays on stack in callbacks
+- ❌ **DO NOT** use recursion in flash callbacks
+
+**Example (WRONG):**
+```cpp
+static int lfs_read(...) {
+    char buf[1024];  // ❌ Large stack allocation!
+    // ...
+}
+```
+
+**Example (CORRECT):**
+```cpp
+static char read_buffer[4096];  // ✅ Static buffer
+static int lfs_read(...) {
+    // Use read_buffer
+}
+```
+
+### 5. **Minimize Logging Frequency During Heavy Operations**
+
+**Problem:** Too many log messages during heavy operations can:
+- Overflow log buffers
+- Block execution
+- Corrupt output
+
+**Rule:**
+- ✅ **DO** log only every N operations (e.g., every 10th or 20th)
+- ✅ **DO** use short log messages
+- ❌ **DO NOT** log every iteration in tight loops
+- ❌ **DO NOT** use complex formatting (float, long strings) during operations
+
+**Example:**
+```cpp
+// Log every 10 pages, not every page
+if (page_number % 10 == 0 || page_number == first_page || page_number == last_page) {
+    LOG_INFO("Progress: %u%%", progress);  // ✅ OK
+}
+```
+
+### 6. **Test After Any Flash-Related Changes**
+
+**Rule:**
+- ✅ **DO** test device boot after changes
+- ✅ **DO** check logs for corruption (`` symbols)
+- ✅ **DO** verify USB connectivity after reboot
+- ✅ **DO** test with fresh filesystem (format scenario)
+
+**Red Flags:**
+- Logs show `` instead of numbers → logging during flash operations
+- Device doesn't boot after flash → watchdog timeout or stack overflow
+- USB not visible → system hang during initialization
+
+### Summary Checklist
+
+Before committing code that touches flash/filesystem:
+
+- [ ] No `LOG_*` calls inside `lfs_read()`, `lfs_prog()`, `lfs_erase()`
+- [ ] No pre-erasing all pages before format
+- [ ] Watchdog fed during long operations
+- [ ] No large stack allocations in callbacks
+- [ ] Minimal logging during heavy operations
+- [ ] Tested device boot and USB connectivity
+- [ ] Logs display correctly (no corruption)
+
+**Remember:** Flash operations are critical and can easily cause system hangs if not handled carefully!
 
 ---
 

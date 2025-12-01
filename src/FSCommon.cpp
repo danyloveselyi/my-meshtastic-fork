@@ -12,6 +12,11 @@
 #include "SPILock.h"
 #include "configuration.h"
 
+#if defined(ARCH_NRF52) && defined(USE_EXTENDED_FS_FOR_NODEDB)
+// Forward declaration for main filesystem initialization (Extended FS has been removed)
+// Main FS initialization is handled by fsInit_patched() which calls initMainFS()
+#endif
+
 // Software SPI is used by MUI so disable SD card here until it's also implemented
 #if defined(HAS_SDCARD) && !defined(SDCARD_USE_SOFT_SPI)
 #include <SD.h>
@@ -40,8 +45,11 @@ SPIClass SPI_HSPI(HSPI);
 bool copyFile(const char *from, const char *to)
 {
 #ifdef FSCom
+    LOG_DEBUG("FSCommon: copyFile('%s' -> '%s') START", from, to);
     // take SPI Lock
+    LOG_DEBUG("FSCommon: Acquiring SPI lock for copyFile...");
     concurrency::LockGuard g(spiLock);
+    LOG_DEBUG("FSCommon: SPI lock acquired, opening source file...");
     unsigned char cbuffer[16];
 
     File f1 = FSCom.open(from, FILE_O_READ);
@@ -49,21 +57,28 @@ bool copyFile(const char *from, const char *to)
         LOG_ERROR("Failed to open source file %s", from);
         return false;
     }
+    LOG_DEBUG("FSCommon: Source file opened, opening destination file...");
 
     File f2 = FSCom.open(to, FILE_O_WRITE);
     if (!f2) {
         LOG_ERROR("Failed to open destination file %s", to);
+        f1.close();
         return false;
     }
+    LOG_DEBUG("FSCommon: Destination file opened, copying data...");
 
+    uint32_t bytes_copied = 0;
     while (f1.available() > 0) {
         byte i = f1.read(cbuffer, 16);
         f2.write(cbuffer, i);
+        bytes_copied += i;
     }
+    LOG_DEBUG("FSCommon: Data copied (%u bytes), flushing and closing files...", bytes_copied);
 
     f2.flush();
     f2.close();
     f1.close();
+    LOG_DEBUG("FSCommon: copyFile('%s' -> '%s') SUCCESS (%u bytes)", from, to, bytes_copied);
     return true;
 #endif
 }
@@ -79,27 +94,53 @@ bool copyFile(const char *from, const char *to)
 bool renameFile(const char *pathFrom, const char *pathTo)
 {
 #ifdef FSCom
+    LOG_DEBUG("FSCommon: renameFile('%s' -> '%s') START", pathFrom, pathTo);
 
 #ifdef ARCH_ESP32
     // take SPI Lock
+    LOG_DEBUG("FSCommon: ESP32 - acquiring SPI lock for rename...");
     spiLock->lock();
     // rename was fixed for ESP32 IDF LittleFS in April
     bool result = FSCom.rename(pathFrom, pathTo);
     spiLock->unlock();
+    LOG_DEBUG("FSCommon: renameFile('%s' -> '%s') %s", pathFrom, pathTo, result ? "SUCCESS" : "FAILED");
     return result;
 #else
     // copyFile does its own locking.
-    if (copyFile(pathFrom, pathTo) && FSCom.remove(pathFrom)) {
-        return true;
-    } else {
-        return false;
+    LOG_DEBUG("FSCommon: NRF52 - using copyFile + remove for rename...");
+    bool copyResult = copyFile(pathFrom, pathTo);
+    LOG_DEBUG("FSCommon: copyFile result: %s", copyResult ? "SUCCESS" : "FAILED");
+    if (copyResult) {
+        LOG_DEBUG("FSCommon: Removing source file '%s'...", pathFrom);
+        bool removeResult = FSCom.remove(pathFrom);
+        LOG_DEBUG("FSCommon: Remove result: %s", removeResult ? "SUCCESS" : "FAILED");
+        if (removeResult) {
+            LOG_DEBUG("FSCommon: renameFile('%s' -> '%s') SUCCESS", pathFrom, pathTo);
+            return true;
+        }
     }
+    LOG_DEBUG("FSCommon: renameFile('%s' -> '%s') FAILED", pathFrom, pathTo);
+    return false;
 #endif
 
 #endif
 }
 
 #include <vector>
+
+// Forward declaration for nrf52Loop() (for feeding watchdog during filesystem operations)
+#ifdef ARCH_NRF52
+extern void nrf52Loop();
+#endif
+
+// Forward declaration for preFSBegin() (declared later in this file, but needed by patches)
+__attribute__((weak)) void preFSBegin();
+
+// Include variant-specific patches if available
+#if defined(ARCH_NRF52) && defined(USE_EXTENDED_FS_FOR_NODEDB)
+#include "../../variants/rak4631_lite/filesystem/FilesystemUnified.h"
+// getFiles_patched will be used instead of getFiles when USE_EXTENDED_FS_FOR_NODEDB is enabled
+#endif
 
 /**
  * @brief Get the list of files in a directory.
@@ -111,6 +152,8 @@ bool renameFile(const char *pathFrom, const char *pathTo)
  * @param levels The number of levels of subdirectories to list.
  * @return A vector of strings containing the full path of each file in the directory.
  */
+#if !(defined(ARCH_NRF52) && defined(USE_EXTENDED_FS_FOR_NODEDB))
+// Standard implementation (for non-RAK4631 or when extended FS is disabled)
 std::vector<meshtastic_FileInfo> getFiles(const char *dirname, uint8_t levels)
 {
     std::vector<meshtastic_FileInfo> filenames = {};
@@ -151,6 +194,7 @@ std::vector<meshtastic_FileInfo> getFiles(const char *dirname, uint8_t levels)
 #endif
     return filenames;
 }
+#endif
 
 /**
  * Lists the contents of a directory.
@@ -286,6 +330,10 @@ __attribute__((weak, noinline)) void preFSBegin() {}
 
 void fsInit()
 {
+#if defined(ARCH_NRF52) && defined(USE_EXTENDED_FS_FOR_NODEDB)
+    // Use patched version from variant
+    fsInit_patched();
+#else
 #ifdef FSCom
     concurrency::LockGuard g(spiLock);
     preFSBegin();
@@ -299,6 +347,7 @@ void fsInit()
     LOG_DEBUG("Filesystem files:");
 #endif
     listDir("/", 10);
+#endif
 #endif
 }
 

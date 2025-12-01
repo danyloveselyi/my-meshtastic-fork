@@ -1,5 +1,8 @@
 #include "configuration.h"
 #include <core_cm4.h>
+#ifdef RAK_4631
+#include "nrf.h"  // For NRF_P1 register access for LED blinking
+#endif
 
 // Based on reading/modifying https://blog.feabhas.com/2013/02/developing-a-generic-hard-fault-handler-for-arm-cortex-m3cortex-m4/
 
@@ -48,8 +51,36 @@ static void printMemErrorMsg(uint32_t cfsr)
         FAULT_MSG("Data access violation\n");
 }
 
+// Simple LED blink function for RAK4631 Lite (GPIO P1.03 = pin 35)
+// Uses direct register access - no initialization required
+#ifdef RAK_4631
+static void blinkLedRak4631(uint32_t count)
+{
+    // LED_GREEN = PIN_LED1 = 35 = P1.03
+    // Configure GPIO P1.03 as output (DIRSET register)
+    NRF_P1->DIRSET = (1UL << 3);
+    
+    for (uint32_t i = 0; i < count; i++) {
+        // Turn LED on (OUTSET register)
+        NRF_P1->OUTSET = (1UL << 3);
+        // Simple delay loop (approximately 100ms at 64MHz)
+        for (volatile uint32_t j = 0; j < 2000000; j++);
+        // Turn LED off (OUTCLR register)
+        NRF_P1->OUTCLR = (1UL << 3);
+        // Delay between blinks
+        for (volatile uint32_t j = 0; j < 2000000; j++);
+    }
+}
+#endif
+
 extern "C" void HardFault_Impl(uint32_t stack[])
 {
+#ifdef RAK_4631
+    // Blink LED rapidly to indicate hard fault (before any logging)
+    // This helps diagnose hard faults that occur before USB initialization
+    blinkLedRak4631(10); // 10 rapid blinks
+#endif
+    
     FAULT_MSG("Hard Fault occurred! SCB->HFSR = 0x%08lx\n", SCB->HFSR);
 
     if ((SCB->HFSR & SCB_HFSR_FORCED_Msk) != 0) {
